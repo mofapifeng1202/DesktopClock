@@ -143,7 +143,7 @@ static void update_weather(void)
     for (int i = 0; i < WEATHER_DAILY_DAYS; i++) {
         lv_label_set_text(s_fore_date[i], wx->daily[i].date);
         lv_label_set_text(s_fore_cond[i], wx_text(wx->daily[i].code));
-        snprintf(buf, sizeof(buf), "%.0f°/%.0f°", (double)wx->daily[i].tmax,
+        snprintf(buf, sizeof(buf), "%.0f°C/%.0f°C", (double)wx->daily[i].tmax,
                  (double)wx->daily[i].tmin);
         lv_label_set_text(s_fore_temp[i], buf);
     }
