@@ -139,3 +139,9 @@ npx lv_font_conv --font NotoSansCJKsc-Regular.otf --size 16 --bpp 4 \
 ```
 
 > 注意：新增任何汉字都必须重新生成字体，否则该字会显示为空白。
+
+## 许可证
+
+- 代码：[MIT](LICENSE)
+- 字体子集（`main/font_cn_*.c`）：由 **Noto Sans CJK SC** 生成，
+  [SIL Open Font License 1.1](LICENSES/OFL-NotoSansCJK.txt)
