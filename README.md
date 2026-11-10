@@ -122,3 +122,20 @@ lv_display_set_rotation(disp, LANDSCAPE_ROTATION);
 - 优化等级为 Debug，改 Release/Size 可提升帧率并缩小体积（横屏软件旋转有额外 CPU 开销，收益更明显）
 - 16MB flash 只用 3MB app 分区，其余空闲（未挂 SPIFFS/LittleFS）
 - `TP_PROBE` / `TP_DEBUG_COORDS` 是触摸调试开关，稳定后可置 0 减少日志噪声
+
+## 字体与许可
+
+`main/font_cn_14.c` / `main/font_cn_16.c` 是用 `lv_font_conv` 从 **Noto Sans CJK SC**
+生成的子集（只含界面用到的 55 个汉字 + ASCII 0x20-0x7E），源字体采用
+**SIL Open Font License 1.1**，许可全文见 `LICENSES/OFL-NotoSansCJK.txt`。
+
+重新生成（需要 Node.js + lv_font_conv + Noto Sans CJK SC 的 OTF）：
+
+```bash
+npx lv_font_conv --font NotoSansCJKsc-Regular.otf --size 16 --bpp 4 \
+  --format lvgl --no-compress --no-kerning --range 0x20-0x7e \
+  --symbols 重庆晴间多云阴雾毛毛雨雪阵雷未知电量连接中失败关闭对时已同步音左右滑动查看天气湿风速更新加载周一二三四五六日度 \
+  --lv-font-name font_cn_16 --lv-include lvgl.h -o main/font_cn_16.c
+```
+
+> 注意：新增任何汉字都必须重新生成字体，否则该字会显示为空白。
