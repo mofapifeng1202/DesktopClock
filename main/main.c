@@ -52,6 +52,7 @@
 
 #include "clock_ui.h"
 #include "main.h"
+#include "radio.h"
 #include "wifi_app.h"
 #include "weather.h"
 
@@ -117,6 +118,8 @@ static SemaphoreHandle_t s_audio_lock;
 static esp_lcd_touch_handle_t s_tp;
 static led_strip_handle_t s_led;
 static int s_volume = 70;
+static int s_audio_rate = MIC_SAMPLE_RATE;
+static int s_audio_ch = 2;
 
 /* 触摸校准诊断：记录最近一次按下的原始/映射坐标，由 boot_btn_task 心跳抛出。
  * （不要在别的任务里主动读触摸，会把 LVGL 要用的点先消费掉） */
@@ -336,6 +339,8 @@ static esp_err_t audio_init(void)
     esp_err_t err = esp_codec_dev_open(s_codec, &fs);
     ESP_RETURN_ON_FALSE(err == ESP_CODEC_DEV_OK, ESP_FAIL, TAG, "codec open %d", err);
     esp_codec_dev_set_out_vol(s_codec, s_volume);
+    s_audio_rate = MIC_SAMPLE_RATE;
+    s_audio_ch = 2;
 
     s_audio_lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_audio_lock != NULL, ESP_FAIL, TAG, "audio mutex");
@@ -347,7 +352,15 @@ void audio_set_vol(int vol)
     if (vol < 0) vol = 0;
     if (vol > 100) vol = 100;
     s_volume = vol;
-    if (s_codec != NULL) {
+    if (s_codec == NULL) {
+        return;
+    }
+    if (s_audio_lock != NULL) {
+        if (xSemaphoreTake(s_audio_lock, portMAX_DELAY) == pdTRUE) {
+            esp_codec_dev_set_out_vol(s_codec, vol);
+            xSemaphoreGive(s_audio_lock);
+        }
+    } else {
         esp_codec_dev_set_out_vol(s_codec, vol);
     }
 }
@@ -355,6 +368,99 @@ void audio_set_vol(int vol)
 int audio_get_vol(void)
 {
     return s_volume;
+}
+
+bool audio_is_ready(void)
+{
+    return s_codec != NULL && s_audio_lock != NULL;
+}
+
+/* Reopen the codec at a new MP3 sample rate. The ES8311 + I2S data interface
+ * reconfigure themselves inside esp_codec_dev_open() when the format changes. */
+esp_err_t audio_stream_open(int sample_rate, int channels)
+{
+    if (sample_rate < 8000 || sample_rate > 48000 || channels != 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!audio_is_ready()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (sample_rate == s_audio_rate && channels == s_audio_ch) {
+        return ESP_OK;
+    }
+    if (xSemaphoreTake(s_audio_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_codec_dev_close(s_codec);
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel = channels,
+        .channel_mask = 0,
+        .sample_rate = sample_rate,
+        .mclk_multiple = 0,
+    };
+    int err = esp_codec_dev_open(s_codec, &fs);
+    if (err == ESP_CODEC_DEV_OK) {
+        s_audio_rate = sample_rate;
+        s_audio_ch = channels;
+        esp_codec_dev_set_out_vol(s_codec, s_volume);
+        ESP_LOGI(TAG, "audio stream: %d Hz, %d ch", sample_rate, channels);
+    } else {
+        ESP_LOGE(TAG, "audio stream reopen %d Hz failed: %d", sample_rate, err);
+        /* Try to get back to the previous rate so the UI/chime still works. */
+        esp_codec_dev_sample_info_t old_fs = {
+            .bits_per_sample = 16,
+            .channel = s_audio_ch,
+            .channel_mask = 0,
+            .sample_rate = s_audio_rate,
+            .mclk_multiple = 0,
+        };
+        if (esp_codec_dev_open(s_codec, &old_fs) == ESP_CODEC_DEV_OK) {
+            esp_codec_dev_set_out_vol(s_codec, s_volume);
+        }
+    }
+    xSemaphoreGive(s_audio_lock);
+    return err == ESP_CODEC_DEV_OK ? ESP_OK : ESP_FAIL;
+}
+
+int audio_stream_write(const void *data, size_t len)
+{
+    if (!audio_is_ready() || data == NULL || len == 0) {
+        return ESP_CODEC_DEV_INVALID_ARG;
+    }
+    if (xSemaphoreTake(s_audio_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_CODEC_DEV_TIMEOUT;
+    }
+    int ret = esp_codec_dev_write(s_codec, (void *)data, len);
+    xSemaphoreGive(s_audio_lock);
+    return ret;
+}
+
+void audio_stream_silence(int ms)
+{
+    if (!audio_is_ready() || ms <= 0) {
+        return;
+    }
+    static int16_t silence[512];   /* 256 stereo frames */
+    int frames = (s_audio_rate * ms) / 1000;
+    if (frames <= 0) {
+        frames = 1;
+    }
+    if (xSemaphoreTake(s_audio_lock, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+    while (frames > 0) {
+        int n = frames > 256 ? 256 : frames;
+        esp_codec_dev_write(s_codec, silence, n * 4);
+        frames -= n;
+    }
+    xSemaphoreGive(s_audio_lock);
+}
+
+int audio_stream_rate(void)
+{
+    return s_audio_rate;
 }
 
 static void speaker_chime(uint32_t ms)
@@ -698,6 +804,11 @@ void app_main(void)
         s_tp = tp;
     }
 
+    nvs_init();
+    radio_init();
+    battery_init();
+    rgb_init();
+
     if (lvgl_port_lock(0)) {
         clock_ui_build();
 
@@ -708,10 +819,6 @@ void app_main(void)
         lvgl_port_unlock();
     }
 
-    nvs_init();
-    battery_init();
-    rgb_init();
-
     ESP_LOGI(TAG, "Initialize ES8311 codec (speaker + volume)");
     if (audio_init() == ESP_OK) {
         speaker_chime(250);
@@ -721,7 +828,8 @@ void app_main(void)
 
     xTaskCreate(boot_btn_task, "boot_btn", 3072, NULL, 3, NULL);
 
-    ESP_LOGI(TAG, "Start Wi-Fi + weather");
+    ESP_LOGI(TAG, "Start Wi-Fi + weather + radio");
     wifi_app_start();
     weather_start();
+    radio_start();
 }

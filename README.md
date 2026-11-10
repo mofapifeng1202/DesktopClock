@@ -3,6 +3,24 @@
 ESP32-S3 (N16R8) + LCDWiki ES3C35P 3.5" 320x480 IPS（ST77922 QSPI + ST7123 触摸）桌面时钟 / 天气站。
 ESP-IDF 5.4.1 + LVGL 9 + esp_lvgl_port。
 
+## 硬件
+
+![产品参数](docs/spec.jpg)
+
+| 部件 | 规格 |
+|---|---|
+| 模组 | ESP32-S3R8（8MB PSRAM + 16MB Flash，Wi-Fi 2.4G + BLE5） |
+| 屏幕 | 3.5" IPS 320×480，ST77922，QSPI |
+| 触摸 | ST7123 电容触摸，I²C（5 点） |
+| 音频 | ES8311 codec + SC8002B 功放 + 1.25mm 喇叭座 |
+| 供电 | USB-C 5V；TP4054 充电管理（4.2V 恒压）+ SL2305 电源切换 |
+| 扩展 | microSD（4D SDIO）、I²C/UART/扩展 IO 座、WS2812 指示灯 |
+
+引脚映射、充电电路、eFuse 摘要、横屏与触摸的实现陷阱见 **[docs/hardware.md](docs/hardware.md)**。
+
+> 注：横屏是**软件旋转**实现的（本模块开启 MADCTL.MV 硬件旋转会花屏），
+> 触摸噪声较大，固件里做了限幅滤波，详见上面的硬件文档。
+
 ## 功能
 
 - 时钟页：48 号数字时钟、秒、星期日期、NTP 对时状态、音量滑块

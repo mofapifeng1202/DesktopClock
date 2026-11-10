@@ -25,6 +25,11 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
+# The radio decodes MP3 in software while LVGL software-rotates the 480x320
+# framebuffer; -Og leaves too little CPU headroom. -O2 keeps the audio path
+# stable without changing any functional configuration.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
 # LVGL
 CONFIG_LV_COLOR_DEPTH_16=y
 # clock_ui.c uses lv_font_montserrat_48 for the big clock digits and 14/24 for the rest;
