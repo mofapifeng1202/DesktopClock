@@ -36,6 +36,8 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_check.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 #include "esp_lcd_panel_io.h"
@@ -57,6 +59,10 @@
 #include "weather.h"
 
 static const char *TAG = "st77922";
+
+/* Bring-up sequence: 1 = auto-play stations after Wi-Fi connects.
+ * Kept at 0 for normal use (the radio page waits for a tap). */
+#define RADIO_SELFTEST 0
 
 #define LCD_HOST        SPI2_HOST
 /* Landscape 480x320 is done with LVGL **software rotation**: driving this panel through
@@ -107,8 +113,9 @@ static const char *TAG = "st77922";
 #define PIN_RGB_LED     40
 #define PIN_BOOT_BTN    0
 
-/* 触摸诊断：每秒打印 INT 电平与控制器上报点数（排查用，稳定后置 0） */
-#define TP_PROBE        1
+/* 触摸诊断：每秒打印 INT 电平与控制器上报点数。正常使用置 0，
+ * 排查触摸问题时再打开。 */
+#define TP_PROBE        0
 
 #define MIC_SAMPLE_RATE 16000
 
@@ -535,6 +542,83 @@ static void boot_btn_task(void *arg)
     }
 }
 
+/* Watches the 1 s LVGL heartbeat. If the screen freezes while the radio task
+ * keeps running, this prints a clear "UI STALL" line with heap/stack data. */
+static void ui_monitor_task(void *arg)
+{
+    (void)arg;
+    uint32_t last_hb = g_ui_heartbeat;
+    int64_t last_change = esp_timer_get_time();
+    bool logged = false;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        uint32_t hb = g_ui_heartbeat;
+        int64_t now = esp_timer_get_time();
+        if (hb != last_hb) {
+            last_hb = hb;
+            last_change = now;
+            logged = false;
+            continue;
+        }
+        int64_t stalled_ms = (now - last_change) / 1000;
+        if (stalled_ms >= 5000 && !logged) {
+            logged = true;
+            TaskHandle_t lvgl = xTaskGetHandle("taskLVGL");
+            UBaseType_t stack_free = lvgl ? uxTaskGetStackHighWaterMark(lvgl) : 0;
+            ESP_LOGW(TAG, "UI STALL %lld ms: int heap %u, psram %u, lvgl stack free %u",
+                     (long long)stalled_ms,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                     (unsigned)stack_free);
+        }
+        if (stalled_ms >= 10000) {
+            ESP_LOGE(TAG, "UI stalled for %lld ms, restarting to recover",
+                     (long long)stalled_ms);
+            esp_restart();
+        }
+    }
+}
+
+#if RADIO_SELFTEST
+static void radio_selftest_task(void *arg)
+{
+    (void)arg;
+    while (wifi_app_state() != WIFI_APP_CONNECTED) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGI(TAG, "SELFTEST: wifi up, starting radio in 5 s");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+
+    ESP_LOGI(TAG, "SELFTEST: station 0 (48 kHz)");
+    radio_play(0);
+    vTaskDelay(pdMS_TO_TICKS(20000));
+
+    ESP_LOGI(TAG, "SELFTEST: station 1 (44.1 kHz)");
+    radio_play(1);
+    vTaskDelay(pdMS_TO_TICKS(20000));
+
+    ESP_LOGI(TAG, "SELFTEST: station 3");
+    radio_play(3);
+    vTaskDelay(pdMS_TO_TICKS(15000));
+
+    ESP_LOGI(TAG, "SELFTEST: pause");
+    radio_toggle_pause();
+    vTaskDelay(pdMS_TO_TICKS(5000));
+
+    ESP_LOGI(TAG, "SELFTEST: resume");
+    radio_toggle_pause();
+    vTaskDelay(pdMS_TO_TICKS(15000));
+
+    ESP_LOGI(TAG, "SELFTEST: next station");
+    radio_next();
+    vTaskDelay(pdMS_TO_TICKS(15000));
+
+    ESP_LOGI(TAG, "SELFTEST: stop");
+    radio_stop();
+    vTaskDelete(NULL);
+}
+#endif
+
 /* ------------------------------- LCD / LVGL -------------------------- */
 
 static esp_err_t i2c_bus_init(void)
@@ -615,14 +699,20 @@ static void tp_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
      *   - clamp per-poll movement instead of rejecting frames, so a swipe keeps its
      *     direction and velocity while ghosts are cut down to a small step
      *   - report the release immediately (any hold-off destroys LVGL's flick velocity)
-     * TP_MAX_STEP is 60px per poll; at LVGL's 30ms read period that still allows
-     * ~2000px/s, well above a normal swipe speed. */
-#define TP_MAX_POINTS   5
-#define TP_MAX_STEP     60
-#define TP_DEBUG_COORDS 1   /* 打印每次按下的落点，用于横屏坐标映射校准；稳定后可置 0 */
+     *
+     * The limit is now time-based, not a fixed 60 px: 3000 px/s at the measured
+     * interval. This matters because the LVGL task can be delayed by radio work;
+     * a fixed 60 px per poll would then turn a normal flick into a slow drag.
+     * Ghost teleports are hundreds of px in one interval, so they are still cut. */
+#define TP_MAX_POINTS     5
+#define TP_MAX_SPEED_PX_S 3000
+#define TP_MIN_STEP       30
+#define TP_MAX_STEP_CAP   240
+#define TP_DEBUG_COORDS   0   /* 打印每次按下的落点，用于横屏坐标映射校准；正常使用置 0 */
 
     static int last_x, last_y;
     static bool have_last;
+    static int64_t last_us;
     static uint32_t clipped_total, clipped_logged;
 
     data->state = LV_INDEV_STATE_RELEASED;
@@ -665,7 +755,9 @@ static void tp_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     ny = (LCD_V_RES - 1) - ny;
 #endif
 
+    int64_t now = esp_timer_get_time();
     if (!have_last) {
+        last_us = now;
 #if TP_DEBUG_COORDS
         /* Orientation calibration: remember the press, boot_btn_task reports it. */
         s_dbg_raw_x = x[best];
@@ -677,27 +769,37 @@ static void tp_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     }
 
     if (have_last) {
+        int64_t dt_us = now - last_us;
+        /* The timer can be delayed by radio/TLS work; bound the interval so a
+         * long stall does not open a huge ghost window. */
+        if (dt_us < 5000) dt_us = 5000;
+        if (dt_us > 100000) dt_us = 100000;
+        int max_step = (int)((int64_t)TP_MAX_SPEED_PX_S * dt_us / 1000000);
+        if (max_step < TP_MIN_STEP) max_step = TP_MIN_STEP;
+        if (max_step > TP_MAX_STEP_CAP) max_step = TP_MAX_STEP_CAP;
+
         int dx = nx - last_x;
         int dy = ny - last_y;
-        if (dx > TP_MAX_STEP || dx < -TP_MAX_STEP || dy > TP_MAX_STEP || dy < -TP_MAX_STEP) {
-            /* implausible step: treat as ghost, move at most TP_MAX_STEP pixels */
-            if (dx > TP_MAX_STEP) dx = TP_MAX_STEP;
-            if (dx < -TP_MAX_STEP) dx = -TP_MAX_STEP;
-            if (dy > TP_MAX_STEP) dy = TP_MAX_STEP;
-            if (dy < -TP_MAX_STEP) dy = -TP_MAX_STEP;
+        if (dx > max_step || dx < -max_step || dy > max_step || dy < -max_step) {
+            /* implausible step: treat as ghost, move at most max_step pixels */
+            if (dx > max_step) dx = max_step;
+            if (dx < -max_step) dx = -max_step;
+            if (dy > max_step) dy = max_step;
+            if (dy < -max_step) dy = -max_step;
             nx = last_x + dx;
             ny = last_y + dy;
             clipped_total++;
             if (clipped_total - clipped_logged >= 10) {
                 clipped_logged = clipped_total;
-                ESP_LOGI(TAG, "touch ghost clipped (%u total): %d,%d",
-                         (unsigned)clipped_total, nx, ny);
+                ESP_LOGI(TAG, "touch ghost clipped (%u total, max_step=%d): %d,%d",
+                         (unsigned)clipped_total, max_step, nx, ny);
             }
         }
     }
 
     last_x = nx;
     last_y = ny;
+    last_us = now;
     have_last = true;
     data->state = LV_INDEV_STATE_PRESSED;
     data->point.x = nx;
@@ -714,8 +816,33 @@ static void nvs_init(void)
     ESP_ERROR_CHECK(err);
 }
 
+static const char *reset_reason_name(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external-pin";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "interrupt-wdt";
+    case ESP_RST_TASK_WDT:  return "task-wdt";
+    case ESP_RST_WDT:       return "other-wdt";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "sdio";
+    case ESP_RST_USB:       return "usb";
+    case ESP_RST_JTAG:      return "jtag";
+    case ESP_RST_EFUSE:     return "efuse";
+    case ESP_RST_PWR_GLITCH:return "power-glitch";
+    case ESP_RST_CPU_LOCKUP:return "cpu-lockup";
+    default:                return "unknown";
+    }
+}
+
 void app_main(void)
 {
+    esp_reset_reason_t rr = esp_reset_reason();
+    ESP_LOGI(TAG, "reset reason: %d (%s)", (int)rr, reset_reason_name(rr));
+
     /* Backlight off until the panel is initialized */
     gpio_config_t bl_cfg = {
         .mode = GPIO_MODE_OUTPUT,
@@ -760,7 +887,13 @@ void app_main(void)
     gpio_set_level(PIN_LCD_BL, 1);
 
     ESP_LOGI(TAG, "Initialize LVGL port");
-    const lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    /* Keep UI/touch above the radio tasks (play=5, net=4). The old priority 4
+     * let a TLS handshake or a long MP3 decode burst starve the LVGL task,
+     * which looks exactly like a frozen screen and a dead touch panel.
+     * The extra stack covers the radio page's label formatting. */
+    port_cfg.task_priority = 6;
+    port_cfg.task_stack = 8192;
     ESP_ERROR_CHECK(lvgl_port_init(&port_cfg));
 
     const lvgl_port_display_cfg_t disp_cfg = {
@@ -816,6 +949,13 @@ void app_main(void)
         lv_indev_set_type(tp_indev, LV_INDEV_TYPE_POINTER);
         lv_indev_set_read_cb(tp_indev, tp_indev_read_cb);
         lv_indev_set_display(tp_indev, disp);
+        /* Poll touch at 50 Hz instead of the default 30 Hz. The ST7123 driver
+         * reads all 5 reports (~3 ms on the 100 kHz bus), so 15 ms would spend
+         * too much of the LVGL task in I2C; 20 ms is a good compromise. */
+        lv_timer_t *tp_timer = lv_indev_get_read_timer(tp_indev);
+        if (tp_timer) {
+            lv_timer_set_period(tp_timer, 20);
+        }
         lvgl_port_unlock();
     }
 
@@ -832,4 +972,8 @@ void app_main(void)
     wifi_app_start();
     weather_start();
     radio_start();
+    xTaskCreate(ui_monitor_task, "ui_mon", 3072, NULL, 1, NULL);
+#if RADIO_SELFTEST
+    xTaskCreate(radio_selftest_task, "radio_test", 4096, NULL, 3, NULL);
+#endif
 }

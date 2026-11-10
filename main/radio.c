@@ -14,6 +14,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -47,8 +48,11 @@ static const char *TAG = "radio";
 #define HTTP_READ_MS      200
 #define NET_STACK         10240
 #define PLAY_STACK        8192
-#define NET_PRIO          5
-#define PLAY_PRIO         6
+/* UI/touch runs at priority 6. Keep both radio tasks below it: a TLS
+ * handshake or a decode burst must never starve the LVGL task. The 128 KB
+ * ring buffer absorbs the resulting short scheduling delays. */
+#define NET_PRIO          4
+#define PLAY_PRIO         5
 
 typedef enum {
     CMD_PLAY = 0,
@@ -80,6 +84,7 @@ static int16_t s_pcm[2 * 1152];
 static int s_cur_rate;
 static int s_cur_ch;
 static int s_bad_frames;
+static int s_underflow_retries;
 
 static int s_level;
 static int64_t s_last_level_us;
@@ -333,9 +338,12 @@ static void reset_decoder(void)
     s_decoder = MP3InitDecoder();
     s_in_len = 0;
     s_in_pos = 0;
-    s_cur_rate = 0;
-    s_cur_ch = 0;
+    /* Keep the codec at its current rate. If the next station uses the same
+     * rate we skip a pointless close/open cycle (and its I2S log noise). */
+    s_cur_rate = audio_stream_rate();
+    s_cur_ch = 2;
     s_bad_frames = 0;
+    s_underflow_retries = 0;
     if (s_decoder == NULL) {
         set_error("MP3 解码器初始化失败");
     }
@@ -357,7 +365,7 @@ static int decode_one_frame(void)
     }
 
     if (s_in_len - s_in_pos < 4) {
-        if (fill_input(50) <= 0) {
+        if (fill_input(20) <= 0) {
             return 0;
         }
     }
@@ -378,7 +386,7 @@ static int decode_one_frame(void)
         return -1;
     }
     if (avail < flen) {
-        if (fill_input(50) <= 0) {
+        if (fill_input(20) <= 0) {
             return 0;
         }
         avail = s_in_len - s_in_pos;
@@ -393,9 +401,16 @@ static int decode_one_frame(void)
     int consumed = (int)(p - (s_mp3_in + s_in_pos));
 
     if (err == ERR_MP3_INDATA_UNDERFLOW) {
-        /* Keep s_in_pos at the frame start so a retry sees the whole frame. */
+        /* Keep s_in_pos at the frame start so a retry sees the whole frame.
+         * If it keeps happening with a complete-looking frame, the header
+         * parser guessed a frame length that is too small; skip one byte. */
+        if (++s_underflow_retries > 4) {
+            s_underflow_retries = 0;
+            s_in_pos++;
+        }
         return 0;
     }
+    s_underflow_retries = 0;
     if (consumed > 0) {
         s_in_pos += consumed;
     } else {
@@ -724,8 +739,8 @@ static void play_task(void *arg)
         } else if (samples == 0) {
             if (st.state == RADIO_STATE_PLAYING) {
                 set_buffering(true);
+                s_underruns++;
             }
-            s_underruns++;
             if (audio_is_ready()) {
                 audio_stream_silence(20);
             } else {

@@ -25,9 +25,10 @@ ESP-IDF 5.4.1 + LVGL 9 + esp_lvgl_port。
 
 - 时钟页：48 号数字时钟、秒、星期日期、NTP 对时状态、音量滑块
 - 天气页：重庆（写死 29.56N/106.55E）当前温度/天气/湿度/风速 + 3 天预报，Open-Meteo 免 key，30 分钟刷新
+- 收音机页：8 个 MP3 网络电台，播放/暂停、上一台/下一台、缓冲与输出电平显示
 - 顶部状态栏：电池电压 + 百分比（ADC1_CH7，1:2 分压）、Wi-Fi 信号、对时状态
-- 左右滑动切换两页；BOOT 键切背光；RGB LED 指示 Wi-Fi 状态
-- ES8311 音频（I2S），开机提示音 + 音量控制
+- 左右滑动切换三页；BOOT 键切背光；RGB LED 指示 Wi-Fi 状态
+- ES8311 音频（I2S），开机提示音 + 全局音量控制（时钟页/收音机页滑块同步）
 
 引脚映射见 `main/main.c` 头部注释。
 
@@ -56,6 +57,31 @@ cp main/wifi_app_secret.h.example main/wifi_app_secret.h
 # 然后填入你的 2.4GHz Wi-Fi 名称/密码（该文件不入库）
 ```
 
+## 网络收音机
+
+第三页是网络收音机：HTTP(S) 拉取 MP3 流 → libhelix 软件解码 → ES8311/I2S 出声。
+
+- 8 个预置台在 `main/radio_stations.h`。只支持直接返回 `audio/mpeg` 的 **MP3 流**；
+  HLS（`.m3u8`）和 AAC 不能播放。改表后重新编译，UI 会按表生成按钮
+  （当前页面是 2×4 网格，最多显示 8 个）。
+- 播放/暂停、上一台/下一台、缓冲百分比、输出电平；音量和时钟页滑块双向同步。
+- 引擎分两个任务：`radio_net` 负责 HTTP/HTTPS 和 128 KB PSRAM 环形缓冲，
+  `radio_play` 负责整帧解析/MP3 解码/I2S 写入。网络抖动不会直接卡住音频。
+- 首次连接预缓冲 24 KB（64 kbps 约 3 秒），稳定后缓冲约 40%~50%。
+- HTTPS 的 mbedTLS 工作缓冲放到 PSRAM（`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`），
+  同时关闭未使用的蓝牙（`CONFIG_BT_ENABLED=n`）腾出内部 RAM；两者都已写进
+  `sdkconfig.defaults`。
+- 调试：`main/main.c` 顶部 `RADIO_SELFTEST` 置 1，会在连上 Wi-Fi 后自动依次
+  播放/切台/暂停/恢复/停止，串口日志打印 `frames / underruns / buf / level`。
+
+已知限制：
+
+- 只支持 MP3 Layer III，不支持 HLS/AAC；电台源可能失效或有地区限制。
+- 没有解析 ICY `StreamTitle`，界面显示电台名，不显示当前曲目。
+- 换台要改 `radio_stations.h` 重新编译，暂未做网页配置/自定义 URL 输入。
+- 采样率切换时可能打印两条 `i2s_channel_disable ... has not been enabled yet`，
+  这是 `esp_codec_dev` 重配 I2S 的良性日志，不影响播放。
+
 ## 环境搭建踩坑记录（macOS x86_64 + 系统 Python 3.9）
 
 国内网络下 GitHub 基本不可用，以下组合可以完整装好：
@@ -83,11 +109,44 @@ cp main/wifi_app_secret.h.example main/wifi_app_secret.h
 只读寄存器）。`main/main.c` 的 `tp_indev_read_cb()` 做了三层处理：
 
 1. 5 个上报点里取接触面积（strength）最大的那个，避免鬼点抢先
-2. **限幅平移**：单帧位移超过 60px 视为鬼点，只按 60px 沿原方向推进（不要用"冻结/丢弃"，
-   那会把滑动速度和惯性抹平，导致切页困难）
+2. **限幅平移**：位移超过 **3000 px/s × 实际间隔**（下限 30px、上限 240px）才视为鬼点，
+   按上限沿原方向推进。不用"冻结/丢弃"，那会把滑动速度和惯性抹平，导致切页困难。
+   限幅改成按时间计算，是因为 LVGL 任务偶尔会被收音机/TLS 延迟；固定 60px/poll
+   在任务被延迟时会把正常快滑变成慢拖
 3. 手指抬起立即上报 RELEASED，并在下次触摸时重置参考点
 
-运行时会限频打印 `touch ghost clipped (N total): x,y`，可用于长期观察噪声水平。
+另外：
+
+- 触摸轮询周期从默认 33ms 改为 **20ms（50Hz）**，拖动和点击更跟手
+- **LVGL 任务优先级 6**，收音机播放 5、网络 4：TLS 握手或解码突发不会再把 UI/触摸饿住
+- `TP_PROBE` / `TP_DEBUG_COORDS` 默认已置 0；排查触摸时再打开
+
+运行时会限频打印 `touch ghost clipped (N total, max_step=...): x,y`，可用于长期观察噪声水平。
+
+## 屏幕/触摸问题排查
+
+固件现在会主动留下几类线索，先看串口（`tools/flash.sh` 后接 `idf.py monitor`，或用
+`tools/serial_capture.py`）：
+
+- **开机第一行** `reset reason: ...`：如果上次是 `brownout` / `power-glitch`，是供电问题；
+  `panic` / `task-wdt` / `cpu-lockup` 是软件崩溃；`usb` / `power-on` 是正常刷机/上电。
+- **每 10 秒** `UI alive: lvgl used ... / frag ... ; int heap ...`：LVGL 池 64KB，正常约用
+  38%、碎片 2~4%；如果 `used` 接近 100% 或 `int heap` 很低，才是内存问题。
+- **`UI STALL ... ms`**：LVGL 任务超过 5 秒没心跳。此时如果 `radio: frames=...` 还在打印，
+  说明芯片没死，是 LVGL 任务被卡住（最可能是显示 flush 等 DMA 完成，或抢锁）；
+  如果日志也完全停了，才是整机死机/重启。
+
+常见原因和处理：
+
+1. **供电**：屏幕背光 + 喇叭 + 充电同时工作可到 ~400mA，弱 USB 口/长线会让 5V 掉压，
+   表现为屏幕花/卡/触摸乱跳，严重时 brownout 重启。换 5V/2A 充电头 + 短线，或拔掉电池
+   只用 USB、降低音量测试。
+2. **触摸不灵敏**：先确认没有厚保护膜、手指不太干；软件上可调
+   `TP_MAX_SPEED_PX_S`（默认 3000）和 `TP_MIN_STEP`（默认 30）。如果日志里
+   `touch ghost clipped` 很频繁，说明环境噪声大，不要盲目提高灵敏度。
+3. **真死机**：把 `reset reason` 和最后 30 秒日志发出来。若看到 `UI STALL`，下一步是给
+   `esp_lvgl_port` 的 `trans_sem` 加超时（当前是 `portMAX_DELAY`），避免 DMA 回调丢失后
+   永久卡住。
 
 ## 横屏 480x320 的做法（含三个坑）
 
@@ -135,19 +194,31 @@ lv_display_set_rotation(disp, LANDSCAPE_ROTATION);
 
 ## 已知问题 / 待办
 
-- 中文字体是 `font_cn_14/16.c` 的子集，**新增任何汉字都会显示空白**，需用 `lv_font_conv` 重新生成
-- `CONFIG_BT_ENABLED=y` 但代码未用蓝牙，白占 flash/RAM，可关闭
-- 优化等级为 Debug，改 Release/Size 可提升帧率并缩小体积（横屏软件旋转有额外 CPU 开销，收益更明显）
-- 16MB flash 只用 3MB app 分区，其余空闲（未挂 SPIFFS/LittleFS）
+- 中文字体是 `font_cn_14/16.c` 与 `font_radio_14/20.c` 的子集，**新增任何汉字都会显示空白**：
+  收音机页改文案后用 `tools/gen_radio_font.sh` 重新生成，时钟/天气页仍按原来的
+  `lv_font_conv` 命令生成
+- 蓝牙已关闭（`CONFIG_BT_ENABLED=n`）以腾出内部 RAM；要用 BLE 时在 sdkconfig 重新打开
+- 编译优化已从 Debug 改为 `-O2`（`CONFIG_COMPILER_OPTIMIZATION_PERF=y`），
+  软件旋转 + MP3 解码需要这部分 CPU 余量
+- 16MB flash 只用 3MB app 分区，其余空闲（未挂 SPIFFS/LittleFS）；收音机缓冲放在 PSRAM
 - `TP_PROBE` / `TP_DEBUG_COORDS` 是触摸调试开关，稳定后可置 0 减少日志噪声
+- HTTPS 电台依赖 NTP 时间同步；刚开机未对时完成时，证书校验可能失败
 
 ## 字体与许可
 
-`main/font_cn_14.c` / `main/font_cn_16.c` 是用 `lv_font_conv` 从 **Noto Sans CJK SC**
-生成的子集（只含界面用到的 55 个汉字 + ASCII 0x20-0x7E），源字体采用
+`main/font_cn_14.c` / `main/font_cn_16.c` 和 `main/font_radio_14.c` /
+`main/font_radio_20.c` 都是用 `lv_font_conv` 从 **Noto Sans CJK SC / Noto Sans SC**
+生成的子集（只含界面用到的汉字 + ASCII 0x20-0x7E），源字体采用
 **SIL Open Font License 1.1**，许可全文见 `LICENSES/OFL-NotoSansCJK.txt`。
 
-重新生成（需要 Node.js + lv_font_conv + Noto Sans CJK SC 的 OTF）：
+收音机页字体重新生成（需要 Node.js + lv_font_conv + fonttools）：
+
+```bash
+FONT=managed_components/lvgl__lvgl/tests/src/test_files/fonts/noto/NotoSansSC-Regular.ttf \
+  ./tools/gen_radio_font.sh
+```
+
+时钟/天气页字体重新生成（需要 Node.js + lv_font_conv + Noto Sans CJK SC 的 OTF）：
 
 ```bash
 npx lv_font_conv --font NotoSansCJKsc-Regular.otf --size 16 --bpp 4 \
@@ -161,5 +232,5 @@ npx lv_font_conv --font NotoSansCJKsc-Regular.otf --size 16 --bpp 4 \
 ## 许可证
 
 - 代码：[MIT](LICENSE)
-- 字体子集（`main/font_cn_*.c`）：由 **Noto Sans CJK SC** 生成，
-  [SIL Open Font License 1.1](LICENSES/OFL-NotoSansCJK.txt)
+- 字体子集（`main/font_cn_*.c`、`main/font_radio_*.c`）：由 **Noto Sans CJK SC /
+  Noto Sans SC** 生成，[SIL Open Font License 1.1](LICENSES/OFL-NotoSansCJK.txt)

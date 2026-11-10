@@ -37,7 +37,7 @@ LV_FONT_DECLARE(font_radio_20);
 #define C_BTN   0x152b4a
 #define C_BTN_SEL 0x123f5a
 
-#define MAX_BTNS 16
+#define MAX_BTNS 8   /* 2 columns x 4 rows fits the 480x320 page */
 
 static lv_obj_t *s_status;
 static lv_obj_t *s_now;
@@ -52,6 +52,10 @@ static lv_obj_t *s_vol_lbl;
 static lv_obj_t *s_btns[MAX_BTNS];
 static int s_btn_count;
 static bool s_vol_sync;
+static radio_state_t s_last_state = (radio_state_t)-1;
+static bool s_last_buffering;
+static int s_last_station = -1;
+static uint32_t s_last_info_color = 0xffffffff;
 
 static void set_text(lv_obj_t *lbl, const char *txt)
 {
@@ -213,33 +217,47 @@ static void tick_cb(lv_timer_t *t)
     default:
         break;
     }
+    bool visual_changed = (st.state != s_last_state) || (st.buffering != s_last_buffering);
+    if (visual_changed) {
+        lv_obj_set_style_text_color(s_status, lv_color_hex(color), 0);
+        s_last_state = st.state;
+        s_last_buffering = st.buffering;
+    }
     set_text(s_status, status);
-    lv_obj_set_style_text_color(s_status, lv_color_hex(color), 0);
+
+    bool active = (st.state == RADIO_STATE_PLAYING ||
+                   st.state == RADIO_STATE_BUFFERING ||
+                   st.state == RADIO_STATE_CONNECTING);
 
     char buf[96];
     if (st.station >= 0 && st.station < radio_station_count()) {
         set_text(s_now, radio_station_name(st.station));
-        snprintf(buf, sizeof(buf), "正在播放 · %s", radio_station_desc(st.station));
+        snprintf(buf, sizeof(buf), "%s · %s", active ? "正在播放" : "已选电台",
+                 radio_station_desc(st.station));
         set_text(s_genre, buf);
     } else {
         set_text(s_now, "未选择电台");
         set_text(s_genre, "正在播放");
     }
 
+    uint32_t info_color = C_DIM;
     if (st.state == RADIO_STATE_ERROR) {
         set_text(s_info, st.error[0] ? st.error : "连接失败");
-        lv_obj_set_style_text_color(s_info, lv_color_hex(C_RED), 0);
+        info_color = C_RED;
     } else if (st.sample_rate > 0) {
         snprintf(buf, sizeof(buf), "%d kbps · %.1f kHz", st.bitrate_kbps,
                  st.sample_rate / 1000.0f);
         set_text(s_info, buf);
-        lv_obj_set_style_text_color(s_info, lv_color_hex(C_CYAN), 0);
+        info_color = C_CYAN;
     } else if (st.state == RADIO_STATE_CONNECTING) {
         set_text(s_info, "正在连接...");
-        lv_obj_set_style_text_color(s_info, lv_color_hex(C_AMBER), 0);
+        info_color = C_AMBER;
     } else {
         set_text(s_info, "等待连接");
-        lv_obj_set_style_text_color(s_info, lv_color_hex(C_DIM), 0);
+    }
+    if (info_color != s_last_info_color) {
+        lv_obj_set_style_text_color(s_info, lv_color_hex(info_color), 0);
+        s_last_info_color = info_color;
     }
 
     snprintf(buf, sizeof(buf), "缓冲 %d%%", st.buffer_pct);
@@ -247,13 +265,13 @@ static void tick_cb(lv_timer_t *t)
     lv_bar_set_value(s_buf_bar, st.buffer_pct, LV_ANIM_OFF);
     lv_bar_set_value(s_level_bar, st.level, LV_ANIM_OFF);
 
-    bool active = (st.state == RADIO_STATE_PLAYING ||
-                   st.state == RADIO_STATE_BUFFERING ||
-                   st.state == RADIO_STATE_CONNECTING);
     set_text(s_play_lbl, active ? "暂停" : "播放");
 
-    for (int i = 0; i < s_btn_count; i++) {
-        style_station_btn(s_btns[i], i == st.station);
+    if (st.station != s_last_station) {
+        for (int i = 0; i < s_btn_count; i++) {
+            style_station_btn(s_btns[i], i == st.station);
+        }
+        s_last_station = st.station;
     }
 }
 

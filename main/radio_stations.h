@@ -4,8 +4,9 @@
  * Preset list. Only direct MP3 (audio/mpeg) streams are supported -- HLS
  * (.m3u8) and AAC stations cannot be played by the libhelix decoder.
  *
- * Add/remove entries freely: the UI builds its grid from radio_station_count().
- * Keep the display names short enough to fit a 128 px wide button at 14 px.
+ * Add/remove entries freely, but the current UI only shows the first 8
+ * (a 2x4 grid on the 480x320 landscape page). Keep display names short enough
+ * to fit a 128 px wide button at 14 px.
  */
 typedef struct {
     const char *name;
