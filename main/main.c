@@ -589,29 +589,21 @@ static void radio_selftest_task(void *arg)
     ESP_LOGI(TAG, "SELFTEST: wifi up, starting radio in 5 s");
     vTaskDelay(pdMS_TO_TICKS(5000));
 
-    ESP_LOGI(TAG, "SELFTEST: station 0 (48 kHz)");
+    ESP_LOGI(TAG, "SELFTEST: station 0 (page 1, 48 kHz)");
     radio_play(0);
-    vTaskDelay(pdMS_TO_TICKS(20000));
+    vTaskDelay(pdMS_TO_TICKS(12000));
 
-    ESP_LOGI(TAG, "SELFTEST: station 1 (44.1 kHz)");
-    radio_play(1);
-    vTaskDelay(pdMS_TO_TICKS(20000));
+    ESP_LOGI(TAG, "SELFTEST: station 12 (page 2, 安徽小说评书)");
+    radio_play(12);
+    vTaskDelay(pdMS_TO_TICKS(12000));
 
-    ESP_LOGI(TAG, "SELFTEST: station 3");
-    radio_play(3);
-    vTaskDelay(pdMS_TO_TICKS(15000));
+    ESP_LOGI(TAG, "SELFTEST: station 14 (page 2, lhttp-hw CDN)");
+    radio_play(14);
+    vTaskDelay(pdMS_TO_TICKS(12000));
 
-    ESP_LOGI(TAG, "SELFTEST: pause");
-    radio_toggle_pause();
-    vTaskDelay(pdMS_TO_TICKS(5000));
-
-    ESP_LOGI(TAG, "SELFTEST: resume");
-    radio_toggle_pause();
-    vTaskDelay(pdMS_TO_TICKS(15000));
-
-    ESP_LOGI(TAG, "SELFTEST: next station");
-    radio_next();
-    vTaskDelay(pdMS_TO_TICKS(15000));
+    ESP_LOGI(TAG, "SELFTEST: station 21 (page 3, 听云相声台)");
+    radio_play(21);
+    vTaskDelay(pdMS_TO_TICKS(12000));
 
     ESP_LOGI(TAG, "SELFTEST: stop");
     radio_stop();

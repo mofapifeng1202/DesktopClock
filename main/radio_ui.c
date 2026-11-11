@@ -2,9 +2,12 @@
  * Radio page for the 480x320 landscape tileview.
  *
  * Layout:
- *   title + state                      (top)
- *   2 x 4 preset buttons | now-playing  (middle)
- *   volume slider                       (bottom)
+ *   title + state + page selector      (top)
+ *   2 x 4 preset buttons | now-playing (middle)
+ *   volume slider                      (bottom)
+ *
+ * The preset list is paginated: 8 buttons per page, < / > in the header flips
+ * pages, so the number of stations is not limited by the UI.
  *
  * All Chinese glyphs on this page come from the generated font_radio_14/20
  * subsets. If you add new text, regenerate them with tools/gen_radio_font.sh,
@@ -37,7 +40,7 @@ LV_FONT_DECLARE(font_radio_20);
 #define C_BTN   0x152b4a
 #define C_BTN_SEL 0x123f5a
 
-#define MAX_BTNS 8   /* 2 columns x 4 rows fits the 480x320 page */
+#define BTNS_PER_PAGE 8   /* 2 columns x 4 rows fits the 480x320 page */
 
 static lv_obj_t *s_status;
 static lv_obj_t *s_now;
@@ -49,12 +52,18 @@ static lv_obj_t *s_level_bar;
 static lv_obj_t *s_play_lbl;
 static lv_obj_t *s_vol;
 static lv_obj_t *s_vol_lbl;
-static lv_obj_t *s_btns[MAX_BTNS];
-static int s_btn_count;
+static lv_obj_t *s_btns[BTNS_PER_PAGE];
+static lv_obj_t *s_btn_lbls[BTNS_PER_PAGE];
+static int s_station_count;
+static int s_page_count;
+static int s_page;
+static lv_obj_t *s_page_lbl;
+static uint32_t s_last_stream_id;
 static bool s_vol_sync;
 static radio_state_t s_last_state = (radio_state_t)-1;
 static bool s_last_buffering;
 static int s_last_station = -1;
+static int s_last_page = -1;
 static uint32_t s_last_info_color = 0xffffffff;
 
 static void set_text(lv_obj_t *lbl, const char *txt)
@@ -109,8 +118,58 @@ static void style_station_btn(lv_obj_t *btn, bool selected)
 
 static void station_cb(lv_event_t *e)
 {
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    radio_play(idx);
+    /* user_data is the index within the current page; the global station
+     * index depends on which page is visible right now. */
+    int idx_in_page = (int)(intptr_t)lv_event_get_user_data(e);
+    int idx = s_page * BTNS_PER_PAGE + idx_in_page;
+    if (idx >= 0 && idx < s_station_count) {
+        radio_play(idx);
+    }
+}
+
+static void apply_page(void)
+{
+    for (int k = 0; k < BTNS_PER_PAGE; k++) {
+        int idx = s_page * BTNS_PER_PAGE + k;
+        if (idx < s_station_count) {
+            lv_obj_remove_flag(s_btns[k], LV_OBJ_FLAG_HIDDEN);
+            set_text(s_btn_lbls[k], radio_station_name(idx));
+        } else {
+            lv_obj_add_flag(s_btns[k], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_page_lbl) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%d/%d", s_page + 1, s_page_count);
+        set_text(s_page_lbl, buf);
+    }
+}
+
+static void show_page(int page)
+{
+    if (page < 0) {
+        page = 0;
+    }
+    if (page > s_page_count - 1) {
+        page = s_page_count - 1;
+    }
+    if (page == s_page) {
+        return;
+    }
+    s_page = page;
+    apply_page();
+}
+
+static void page_prev_cb(lv_event_t *e)
+{
+    (void)e;
+    show_page(s_page - 1);
+}
+
+static void page_next_cb(lv_event_t *e)
+{
+    (void)e;
+    show_page(s_page + 1);
 }
 
 static void update_vol_label(int vol)
@@ -191,6 +250,19 @@ static void tick_cb(lv_timer_t *t)
     radio_status_t st;
     radio_get_status(&st);
 
+    /* Follow preset changes started elsewhere (engine prev/next): flip to the
+     * page that holds the station whenever a new stream starts. Manual page
+     * browsing is never overridden while no new stream starts. */
+    if (st.stream_id != s_last_stream_id) {
+        s_last_stream_id = st.stream_id;
+        if (st.station >= 0 && st.station < s_station_count) {
+            int want = st.station / BTNS_PER_PAGE;
+            if (want != s_page) {
+                show_page(want);
+            }
+        }
+    }
+
     const char *status = "已停止";
     uint32_t color = C_DIM;
     switch (st.state) {
@@ -267,11 +339,13 @@ static void tick_cb(lv_timer_t *t)
 
     set_text(s_play_lbl, active ? "暂停" : "播放");
 
-    if (st.station != s_last_station) {
-        for (int i = 0; i < s_btn_count; i++) {
-            style_station_btn(s_btns[i], i == st.station);
+    if (st.station != s_last_station || s_page != s_last_page) {
+        for (int k = 0; k < BTNS_PER_PAGE; k++) {
+            int idx = s_page * BTNS_PER_PAGE + k;
+            style_station_btn(s_btns[k], idx == st.station && idx < s_station_count);
         }
         s_last_station = st.station;
+        s_last_page = s_page;
     }
 }
 
@@ -284,29 +358,43 @@ void radio_ui_build(lv_obj_t *parent)
     s_status = make_label(parent, F14, C_DIM, 0, 0, "已停止");
     lv_obj_align(s_status, LV_ALIGN_TOP_RIGHT, -12, 6);
 
-    /* preset grid: 2 columns x 4 rows */
-    s_btn_count = radio_station_count();
-    if (s_btn_count > MAX_BTNS) {
-        s_btn_count = MAX_BTNS;
-    }
-    for (int i = 0; i < s_btn_count; i++) {
-        int col = i % 2;
-        int row = i / 2;
+    /* preset grid: 8 buttons, one page at a time (2 columns x 4 rows).
+     * Stations beyond the first page are reached with the header pager. */
+    s_station_count = radio_station_count();
+    s_page_count = (s_station_count + BTNS_PER_PAGE - 1) / BTNS_PER_PAGE;
+    s_page = 0;
+    for (int k = 0; k < BTNS_PER_PAGE; k++) {
+        int col = k % 2;
+        int row = k / 2;
         int x = 10 + col * 134;
         int y = 38 + row * 47;
         lv_obj_t *btn = lv_button_create(parent);
         lv_obj_set_pos(btn, x, y);
         lv_obj_set_size(btn, 128, 42);
         style_station_btn(btn, false);
-        lv_obj_add_event_cb(btn, station_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(btn, station_cb, LV_EVENT_CLICKED, (void *)(intptr_t)k);
 
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, F14, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(C_TEXT), 0);
-        lv_label_set_text(lbl, radio_station_name(i));
+        lv_label_set_text(lbl, k < s_station_count ? radio_station_name(k) : "");
         lv_obj_center(lbl);
-        s_btns[i] = btn;
+        s_btns[k] = btn;
+        s_btn_lbls[k] = lbl;
+        if (k >= s_station_count) {
+            lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
+        }
     }
+
+    /* header pager, only when the list spans more than one page */
+    if (s_page_count > 1) {
+        make_ctrl_button(parent, 208, 1, 32, 24, "<", F14, page_prev_cb);
+        s_page_lbl = make_label(parent, F14, C_TEXT, 242, 7, "1/1");
+        lv_obj_set_width(s_page_lbl, 32);
+        lv_obj_set_style_text_align(s_page_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        make_ctrl_button(parent, 278, 1, 32, 24, ">", F14, page_next_cb);
+    }
+    apply_page();
 
     /* now-playing card */
     lv_obj_t *card = make_card(parent, 278, 38, 192, 194);
