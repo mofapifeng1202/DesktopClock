@@ -221,7 +221,7 @@ static void spectrum_tick_cb(lv_timer_t *t)
         return;
     }
     uint8_t spec[SPECTRUM_BANDS];
-    spectrum_copy(spec);
+    spectrum_copy(CTX_TV, spec);
     if (memcmp(spec, s_spec_draw, sizeof(spec)) != 0) {
         memcpy(s_spec_draw, spec, sizeof(spec));
         lv_obj_invalidate(s_spec);
@@ -486,10 +486,10 @@ void tv_ui_build(lv_obj_t *parent)
 
     make_label(parent, F20, C_TEXT, 12, 2, "网络电视");
     s_status = make_label(parent, F14, C_DIM, 0, 0, "已停止");
-    lv_obj_align(s_status, LV_ALIGN_TOP_RIGHT, -78, 6);
+    lv_obj_align(s_status, LV_ALIGN_TOP_RIGHT, -84, 6);
     s_list = make_label(parent, F14, C_DIM, 0, 0, lstate_text());
-    lv_obj_align(s_list, LV_ALIGN_TOP_RIGHT, -152, 6);
-    make_ctrl_button(parent, 396, 1, 66, 24, "刷新列表", F14, reload_cb);
+    lv_obj_align(s_list, LV_ALIGN_TOP_RIGHT, -172, 6);
+    make_ctrl_button(parent, 406, 1, 72, 24, "刷新列表", F14, reload_cb);
 
     /* big now-playing panel, tap to open the channel drawer */
     lv_obj_t *card = make_card(parent, 10, 36, 460, 150);
@@ -501,7 +501,7 @@ void tv_ui_build(lv_obj_t *parent)
     s_spec = lv_obj_create(card);
     lv_obj_remove_style_all(s_spec);
     lv_obj_set_pos(s_spec, 16, 48);
-    lv_obj_set_size(s_spec, 428, 88);
+    lv_obj_set_size(s_spec, 428, 74);
     lv_obj_remove_flag(s_spec, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(s_spec, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_spec, spectrum_draw_cb, LV_EVENT_DRAW_MAIN, NULL);

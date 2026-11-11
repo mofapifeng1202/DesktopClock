@@ -39,6 +39,7 @@ static int *s_rev;        /* FFT_N bit-reversal */
 static bool s_tables_ready;
 
 static int s_rate;        /* 0 = disabled */
+static int s_src_ctx = -1; /* which page the data belongs to */
 static uint8_t s_band_lo[SPECTRUM_BANDS];
 static uint8_t s_band_hi[SPECTRUM_BANDS];
 static float s_band_gain[SPECTRUM_BANDS];
@@ -122,9 +123,10 @@ static void fft_run(void)
     }
 }
 
-void spectrum_reset(int sample_rate)
+void spectrum_reset(int sample_rate, int ctx)
 {
     memset((void *)s_bands, 0, SPECTRUM_BANDS);
+    s_src_ctx = ctx;
     s_last_feed_us = esp_timer_get_time();
     if (sample_rate <= 0) {
         s_rate = 0;
@@ -228,9 +230,18 @@ void spectrum_idle(void)
     }
 }
 
-void spectrum_copy(uint8_t *out)
+bool spectrum_ready(void)
+{
+    return s_rate != 0;
+}
+
+void spectrum_copy(int ctx, uint8_t *out)
 {
     if (out == NULL) {
+        return;
+    }
+    if (ctx != s_src_ctx) {
+        memset(out, 0, SPECTRUM_BANDS);
         return;
     }
     memcpy(out, (const uint8_t *)s_bands, SPECTRUM_BANDS);

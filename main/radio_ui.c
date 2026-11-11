@@ -407,7 +407,7 @@ static void spectrum_tick_cb(lv_timer_t *t)
         return;
     }
     uint8_t spec[SPECTRUM_BANDS];
-    spectrum_copy(spec);
+    spectrum_copy(CTX_PRESET, spec);
     if (memcmp(spec, s_spec_draw, sizeof(spec)) != 0) {
         memcpy(s_spec_draw, spec, sizeof(spec));
         lv_obj_invalidate(s_spec);

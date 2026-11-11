@@ -346,7 +346,7 @@ static void reset_decoder(void)
     s_cur_rate = audio_stream_rate();
     s_cur_ch = 2;
     ts_demux_reset();
-    spectrum_reset(0);
+    spectrum_reset(0, (int)s_ctx);
 
     if (s_active_type == MEDIA_MP3) {
         s_mp3dec = MP3InitDecoder();
@@ -378,17 +378,21 @@ static int apply_stream_info(int sample_rate, int channels, int bitrate_bps)
     if (sample_rate == 0) {
         return 2;
     }
-    if (sample_rate != s_cur_rate || s_cur_ch != 2) {
-        esp_err_t e = audio_stream_open(sample_rate, 2);
-        if (e != ESP_OK) {
-            ESP_LOGE(TAG, "codec open %d Hz failed: %s", sample_rate, esp_err_to_name(e));
-            set_error("音频输出失败");
-            s_stop_req = true;
-            return -1;
+    /* The spectrum must be re-armed on every new stream: reset_decoder
+     * disables it, and same-rate station changes never touch the codec. */
+    if (sample_rate != s_cur_rate || s_cur_ch != 2 || !spectrum_ready()) {
+        if (sample_rate != s_cur_rate || s_cur_ch != 2) {
+            esp_err_t e = audio_stream_open(sample_rate, 2);
+            if (e != ESP_OK) {
+                ESP_LOGE(TAG, "codec open %d Hz failed: %s", sample_rate, esp_err_to_name(e));
+                set_error("音频输出失败");
+                s_stop_req = true;
+                return -1;
+            }
+            s_cur_rate = sample_rate;
+            s_cur_ch = 2;
         }
-        s_cur_rate = sample_rate;
-        s_cur_ch = 2;
-        spectrum_reset(sample_rate);
+        spectrum_reset(sample_rate, (int)s_ctx);
     }
     set_info(bitrate_bps / 1000, sample_rate, channels);
     return channels;
@@ -1149,17 +1153,44 @@ static void start_stream(const char *name, const char *url, media_type_t type, i
     } else {
         char work[512];
         strlcpy(work, url, sizeof(work));
-        esp_http_client_handle_t client = http_open(work, true);
-        if (client == NULL) {
-            set_error("HTTP 初始化失败");
-        } else {
-            if (http_connect(client, NULL, false)) {
-                esp_http_client_set_timeout_ms(client, HTTP_READ_MS);
-                set_state(RADIO_STATE_BUFFERING, NULL);
-                http_body_to_ring(client);
+        /* Transient failures (server drops, Wi-Fi hiccup, resume after a long
+         * pause) are retried up to 3 times; the error of every attempt stays
+         * in the log for diagnosis. */
+        for (int attempt = 1; attempt <= 3 && !s_stop_req; attempt++) {
+            esp_http_client_handle_t client = http_open(work, true);
+            if (client == NULL) {
+                set_error("HTTP 初始化失败");
+                break;
             }
+            if (!http_connect(client, NULL, false)) {
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+                if (attempt < 3) {
+                    ESP_LOGW(TAG, "connect failed, retry %d/3", attempt);
+                    set_state(RADIO_STATE_CONNECTING, NULL);
+                    vTaskDelay(pdMS_TO_TICKS(800));
+                    continue;
+                }
+                break;
+            }
+            esp_http_client_set_timeout_ms(client, HTTP_READ_MS);
+            set_state(RADIO_STATE_BUFFERING, NULL);
+            http_body_to_ring(client);
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
+
+            radio_state_t st = get_state();
+            if (st == RADIO_STATE_PAUSED || s_stop_req) {
+                break;                    /* user stopped/paused: no retry */
+            }
+            if (attempt < 3) {
+                ESP_LOGW(TAG, "stream ended, retry %d/3", attempt);
+                set_state(RADIO_STATE_CONNECTING, NULL);
+                ring_flush();
+                vTaskDelay(pdMS_TO_TICKS(800));
+                continue;
+            }
+            break;
         }
     }
 
@@ -1432,7 +1463,7 @@ void radio_play(int station)
         return;
     }
     s_ctx = CTX_PRESET;
-    radio_msg_t m = {.cmd = CMD_PLAY, .arg = station};
+    radio_msg_t m = {.cmd = CMD_PLAY, .ctx = CTX_PRESET, .arg = station};
     xQueueSend(s_queue, &m, 0);
 }
 
@@ -1450,7 +1481,7 @@ void radio_play_tv(int idx)
         return;
     }
     s_ctx = CTX_TV;
-    radio_msg_t m = {.cmd = CMD_PLAY, .arg = idx};
+    radio_msg_t m = {.cmd = CMD_PLAY, .ctx = CTX_TV, .arg = idx};
     xQueueSend(s_queue, &m, 0);
 }
 
