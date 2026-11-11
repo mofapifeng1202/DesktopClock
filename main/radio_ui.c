@@ -376,16 +376,6 @@ static void tick_cb(lv_timer_t *t)
     set_text(s_buf_lbl, buf);
     lv_bar_set_value(s_buf_bar, st.buffer_pct, LV_ANIM_OFF);
 
-    /* spectrum bars: invalidate only when a value actually moved */
-    uint8_t spec[SPECTRUM_BANDS];
-    spectrum_copy(spec);
-    if (memcmp(spec, s_spec_draw, sizeof(spec)) != 0) {
-        memcpy(s_spec_draw, spec, sizeof(spec));
-        if (s_spec) {
-            lv_obj_invalidate(s_spec);
-        }
-    }
-
     set_text(s_play_lbl, active ? "暂停" : "播放");
 
     if (st.station != s_last_station || s_page != s_last_page) {
@@ -395,6 +385,23 @@ static void tick_cb(lv_timer_t *t)
         }
         s_last_station = st.station;
         s_last_page = s_page;
+    }
+}
+
+/* Spectrum runs on its own fast timer (~30 fps), decoupled from the slow
+ * status tick — sampling the bands every 200 ms made the bars jump like the
+ * display was dropping frames. */
+static void spectrum_tick_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_spec == NULL) {
+        return;
+    }
+    uint8_t spec[SPECTRUM_BANDS];
+    spectrum_copy(spec);
+    if (memcmp(spec, s_spec_draw, sizeof(spec)) != 0) {
+        memcpy(s_spec_draw, spec, sizeof(spec));
+        lv_obj_invalidate(s_spec);
     }
 }
 
@@ -491,5 +498,6 @@ void radio_ui_build(lv_obj_t *parent)
     make_label(parent, F14, C_DIM, 390, 250, "滑动切页");
 
     lv_timer_create(tick_cb, 200, NULL);
+    lv_timer_create(spectrum_tick_cb, 33, NULL);
     tick_cb(NULL);
 }

@@ -67,8 +67,9 @@ cp main/wifi_app_secret.h.example main/wifi_app_secret.h
   跑一次 `tools/gen_radio_font.sh` 重新生成收音机字体。
 - 播放/暂停、上一台/下一台、缓冲百分比、输出电平；音量和时钟页滑块双向同步。
 - 频谱：播放任务对每帧解码出的 PCM 做 256 点 FFT（约 0.3 ms/帧，PSRAM 存表），
-  映射成 16 个对数频段；UI 在 now-playing 卡片里自绘 16 根频谱条，
-  换台/断流时自动回落。低码率流（如 22050 Hz）同样支持。
+  映射成 16 个对数频段；UI 用独立的 ~30fps 定时器采样自绘（与 200ms 状态刷新解耦，
+  否则会像掉帧），回落速度按时间计算（约 110%/s）。换台/断流时自动回落，
+  低码率流（如 22050 Hz）同样支持。灵敏度可调 spectrum.c 里的 BAND_SCALE / BAND_HF_TILT。
 - 引擎分两个任务：`radio_net` 负责 HTTP/HTTPS 和 128 KB PSRAM 环形缓冲，
   `radio_play` 负责整帧解析/MP3 解码/I2S 写入。网络抖动不会直接卡住音频。
 - 首次连接预缓冲 24 KB（64 kbps 约 3 秒），稳定后缓冲约 40%~50%。

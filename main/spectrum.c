@@ -24,9 +24,9 @@
 
 #define BAND_F_MIN     150.0f   /* lowest analyzed frequency, Hz */
 #define BAND_F_MAX     14000.0f /* highest analyzed frequency, Hz */
-#define BAND_SCALE     2.5f     /* raw magnitude -> percent */
-#define BAND_HF_TILT   0.05f    /* per-band gain boost for high frequencies */
-#define BAND_FALL      5        /* per-frame decay, percent */
+#define BAND_SCALE     1.8f     /* raw magnitude -> percent */
+#define BAND_HF_TILT   0.04f    /* per-band gain boost for high frequencies */
+#define BAND_FALL_PER_S 110.0f  /* decay speed, percent per second (time-based) */
 
 static const char *TAG = "spectrum";
 
@@ -43,6 +43,7 @@ static uint8_t s_band_lo[SPECTRUM_BANDS];
 static uint8_t s_band_hi[SPECTRUM_BANDS];
 static float s_band_gain[SPECTRUM_BANDS];
 static volatile uint8_t s_bands[SPECTRUM_BANDS];
+static int64_t s_last_feed_us;
 
 static void *spec_alloc(size_t n)
 {
@@ -124,6 +125,7 @@ static void fft_run(void)
 void spectrum_reset(int sample_rate)
 {
     memset((void *)s_bands, 0, SPECTRUM_BANDS);
+    s_last_feed_us = esp_timer_get_time();
     if (sample_rate <= 0) {
         s_rate = 0;
         return;
@@ -171,6 +173,17 @@ void spectrum_feed_frame(const int16_t *pcm, int total_samples)
     }
     fft_run();
 
+    /* Time-based decay: the frame rate differs between sample rates
+     * (19 Hz at 22.05 kHz vs 42 Hz at 48 kHz), so the fall speed is
+     * expressed in percent/second instead of percent/frame. */
+    int64_t now = esp_timer_get_time();
+    float dt_s = (now - s_last_feed_us) / 1e6f;
+    s_last_feed_us = now;
+    if (dt_s < 0.005f) dt_s = 0.005f;
+    if (dt_s > 0.2f) dt_s = 0.2f;
+    int fall = (int)(BAND_FALL_PER_S * dt_s + 0.5f);
+    if (fall < 1) fall = 1;
+
     for (int b = 0; b < SPECTRUM_BANDS; b++) {
         float m2max = 0.0f;
         for (int k = s_band_lo[b]; k <= s_band_hi[b]; k++) {
@@ -181,7 +194,7 @@ void spectrum_feed_frame(const int16_t *pcm, int total_samples)
         if (v > 100) v = 100;
         int prev = s_bands[b];
         if (v < prev) {                       /* attack instant, fall linear */
-            v = prev - BAND_FALL;
+            v = prev - fall;
             if (v < 0) v = 0;
         }
         s_bands[b] = (uint8_t)v;
