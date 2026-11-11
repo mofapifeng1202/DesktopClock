@@ -90,9 +90,9 @@ cp main/wifi_app_secret.h.example main/wifi_app_secret.h
 
 ## 网络电视（IPTV，音频）
 
-tileview 第 4 页是 IPTV：开机后自动从 `TV_LIST_URL`（默认
-`http://192.168.1.98:1905/interface.m3u?relay=2`，内网 IPTV 中继）拉取 m3u
-频道表并解析，当前接入 86 个频道。
+tileview 第 4 页是 IPTV：开机后自动从 `TV_LIST_URL`（在 `main/tv_config.h`
+里配置，复制 `tv_config.h.example` 后填入你的内网 IPTV 中继地址）拉取 m3u
+频道表并解析并按 央视/地方卫视/其他 分组排序。
 
 - 交互：点中间大面板 → 左侧滑出频道抽屉（可滚动，按 **央视 → 地方卫视 → 其他**
   分组排序，组内按名称），点频道即换台并收起；底部有播放/暂停和上一台/下一台，
