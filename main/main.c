@@ -54,6 +54,7 @@
 
 #include "clock_ui.h"
 #include "main.h"
+#include "media_list.h"
 #include "radio.h"
 #include "wifi_app.h"
 #include "weather.h"
@@ -586,24 +587,38 @@ static void radio_selftest_task(void *arg)
     while (wifi_app_state() != WIFI_APP_CONNECTED) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-    ESP_LOGI(TAG, "SELFTEST: wifi up, starting radio in 5 s");
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_LOGI(TAG, "SELFTEST: wifi up");
 
-    ESP_LOGI(TAG, "SELFTEST: station 0 (page 1, 48 kHz)");
+    /* Wait for the IPTV playlist (loaded async after radio_init). */
+    int wait = 0;
+    while (media_list_state() != MEDIA_LIST_OK && wait < 20) {
+        ESP_LOGI(TAG, "SELFTEST: playlist state=%d", (int)media_list_state());
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        wait++;
+    }
+    ESP_LOGI(TAG, "SELFTEST: playlist %d channels, radio in 3 s",
+             media_list_count());
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    ESP_LOGI(TAG, "SELFTEST: radio preset 0 (MP3 path regression)");
     radio_play(0);
-    vTaskDelay(pdMS_TO_TICKS(12000));
+    vTaskDelay(pdMS_TO_TICKS(10000));
 
-    ESP_LOGI(TAG, "SELFTEST: station 12 (page 2, 安徽小说评书)");
-    radio_play(12);
-    vTaskDelay(pdMS_TO_TICKS(12000));
-
-    ESP_LOGI(TAG, "SELFTEST: station 14 (page 2, lhttp-hw CDN)");
-    radio_play(14);
-    vTaskDelay(pdMS_TO_TICKS(12000));
-
-    ESP_LOGI(TAG, "SELFTEST: station 21 (page 3, 听云相声台)");
-    radio_play(21);
-    vTaskDelay(pdMS_TO_TICKS(12000));
+    if (media_list_count() > 0) {
+        ESP_LOGI(TAG, "SELFTEST: TV ch 0 (%s)", media_list_url(0));
+        radio_play_tv(0);
+        vTaskDelay(pdMS_TO_TICKS(15000));
+    }
+    if (media_list_count() > 1) {
+        ESP_LOGI(TAG, "SELFTEST: TV ch 1 (%s)", media_list_url(1));
+        radio_play_tv(1);
+        vTaskDelay(pdMS_TO_TICKS(15000));
+    }
+    if (media_list_count() > 2) {
+        ESP_LOGI(TAG, "SELFTEST: TV ch 2 (udp, expect error)");
+        radio_play_tv(2);
+        vTaskDelay(pdMS_TO_TICKS(6000));
+    }
 
     ESP_LOGI(TAG, "SELFTEST: stop");
     radio_stop();

@@ -1,0 +1,4 @@
+/* 本地 IPTV 频道表地址 —— 本文件已被 .gitignore 排除，不会进仓库。
+ * 未提供该文件时使用代码里的默认地址（局域网 IPTV 列表）。
+ * 注意：ESP32 需要能访问该地址；udp:// 组播源请先用 udpxy 转 http。 */
+#define TV_LIST_URL "http://192.168.1.98:1905/interface.m3u?relay=2"

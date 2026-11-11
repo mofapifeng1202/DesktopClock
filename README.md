@@ -26,8 +26,9 @@ ESP-IDF 5.4.1 + LVGL 9 + esp_lvgl_port。
 - 时钟页：48 号数字时钟、秒、星期日期、NTP 对时状态、音量滑块
 - 天气页：重庆（写死 29.56N/106.55E）当前温度/天气/湿度/风速 + 3 天预报，Open-Meteo 免 key，30 分钟刷新
 - 收音机页：24 个 MP3 网络电台（每页 8 个、头部 < > 翻页），播放/暂停、上一台/下一台、实时频谱与缓冲显示
+- 电视页：接入内网 IPTV（m3u 运行时解析，86 个频道），只出声音不出画面（ESP32 无法解 HEVC）
 - 顶部状态栏：电池电压 + 百分比（ADC1_CH7，1:2 分压）、Wi-Fi 信号、对时状态
-- 左右滑动切换三页；BOOT 键切背光；RGB LED 指示 Wi-Fi 状态
+- 左右滑动切换四页；BOOT 键切背光；RGB LED 指示 Wi-Fi 状态
 - ES8311 音频（I2S），开机提示音 + 全局音量控制（时钟页/收音机页滑块同步）
 
 引脚映射见 `main/main.c` 头部注释。
@@ -86,6 +87,28 @@ cp main/wifi_app_secret.h.example main/wifi_app_secret.h
 - 换台要改 `radio_stations.h` 重新编译，暂未做网页配置/自定义 URL 输入。
 - 采样率切换时可能打印两条 `i2s_channel_disable ... has not been enabled yet`，
   这是 `esp_codec_dev` 重配 I2S 的良性日志，不影响播放。
+
+## 网络电视（IPTV，音频）
+
+tileview 第 4 页是 IPTV：开机后自动从 `TV_LIST_URL`（默认
+`http://192.168.1.98:1905/interface.m3u?relay=2`，内网 IPTV 中继）拉取 m3u
+频道表并解析，当前接入 86 个频道。
+
+- **只能听，不能看**：IPTV 视频是 HEVC 编码，ESP32-S3 没有硬解，软解不可能。
+  页面显示频道名/频谱/缓冲，扬声器出电视声音。
+- 管线：HLS 播放列表刷新 + 分段下载 → 自研 TS 解复用（`ts_demux.c`，约 150 行：
+  PAT → PMT → 只挑音频流 → PES 重组；esp_audio_codec 自带的 TS 解析器对
+  HEVC-first 的 PMT 选流会出错，所以自己写了）→ esp_audio_codec AAC 解码 →
+  现有输出管线（频谱/音量/ES8311 全部复用）。
+- 频道表地址改 `main/tv_config.h`（复制 `tv_config.h.example`，已 gitignore）。
+  m3u 是运行时解析的，频道名用 14px 字体 + 内置思源黑体 CJK 兜底
+  （`CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_16_CJK`，约 +154 KB flash），
+  任意生僻字都能显示。
+- IPTV 预缓冲 100 KB（约 0.5 s）再开播，跨 HLS 分段的间隙不会断音；
+  AAC 解码占单核 16~19%，实测连续播放无报错。flash 余量约 45%。
+- `udp://@` 组播源暂不支持（列表里会保留，点播时提示）——需要 udpxy 转 http。
+- `udp://@` 之外的所有条目按 TS over HTTP 处理；fMP4（`#EXT-X-MAP`）的
+  HLS 会提示暂不支持。
 
 ## 环境搭建踩坑记录（macOS x86_64 + 系统 Python 3.9）
 

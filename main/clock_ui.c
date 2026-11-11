@@ -16,6 +16,7 @@
 #include "clock_ui.h"
 #include "main.h"
 #include "radio_ui.h"
+#include "tv_ui.h"
 #include "weather.h"
 #include "wifi_app.h"
 
@@ -291,6 +292,10 @@ void clock_ui_build(void)
 
     /* radio page */
     radio_ui_build(tile_radio);
+
+    /* IPTV page */
+    lv_obj_t *tile_tv = lv_tileview_add_tile(tv, 3, 0, LV_DIR_HOR);
+    tv_ui_build(tile_tv);
 
     lv_timer_create(tick_cb, 1000, NULL);
     update_status();

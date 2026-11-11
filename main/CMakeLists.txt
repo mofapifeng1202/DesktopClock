@@ -1,5 +1,6 @@
 idf_component_register(SRCS "main.c" "wifi_app.c" "weather.c" "clock_ui.c"
                              "radio.c" "radio_ui.c" "spectrum.c"
+                             "media_list.c" "ts_demux.c" "tv_ui.c"
                              "font_cn_14.c" "font_cn_16.c"
                              "font_radio_14.c" "font_radio_20.c"
                        INCLUDE_DIRS "."

@@ -15,3 +15,6 @@ main/wifi_app_secret.h
 
 # ---- 系统垃圾 ----
 .DS_Store
+
+# ---- 本地 IPTV 频道表地址（复制 tv_config.h.example 后自己填）----
+main/tv_config.h
