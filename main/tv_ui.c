@@ -1,10 +1,19 @@
 /*
  * IPTV page for the 480x320 landscape tileview.
  *
- * Same layout/language as the radio page, but the channel list comes from the
- * runtime m3u playlist (media_list). Channel names may contain characters that
- * are not in the generated font subsets, so every label on this page uses
- * font_radio_14 with the built-in Source Han Sans CJK font as fallback.
+ * Layout:
+ *   header (title / play state / playlist state / refresh)
+ *   big now-playing panel: channel name + spectrum + buffer, tap -> drawer
+ *   controls: play / prev / next / volume
+ *   left drawer (slides in): grouped channel list (央视 / 卫视 / 其他),
+ *   tap a channel to switch; rows are built on open and freed on close
+ *
+ * The channel list comes from the runtime m3u playlist (media_list). Channel
+ * names may contain characters outside the generated font subsets, so every
+ * text on this page uses font_radio_14 with the built-in Source Han Sans CJK
+ * font as fallback.
+ *
+ * Video is not decodable on ESP32-S3 (HEVC), so this page is audio-only.
  */
 #include <stdio.h>
 #include <string.h>
@@ -36,14 +45,15 @@ LV_FONT_DECLARE(lv_font_source_han_sans_sc_16_cjk);
 #define C_CARD  0x13294a
 #define C_BTN   0x152b4a
 #define C_BTN_SEL 0x123f5a
+#define C_DRAWER 0x0e2038
 
-#define BTNS_PER_PAGE 8
+#define DRAWER_W 320
 
 static lv_font_t s_tv_font;   /* RAM copy of font_radio_14 + CJK fallback */
 
 static lv_obj_t *s_status;    /* play state */
 static lv_obj_t *s_list;      /* playlist load state */
-static lv_obj_t *s_now;
+static lv_obj_t *s_now;       /* big channel name */
 static lv_obj_t *s_info;
 static lv_obj_t *s_buf_lbl;
 static lv_obj_t *s_buf_bar;
@@ -52,20 +62,23 @@ static uint8_t s_spec_draw[SPECTRUM_BANDS];
 static lv_obj_t *s_play_lbl;
 static lv_obj_t *s_vol;
 static lv_obj_t *s_vol_lbl;
-static lv_obj_t *s_btns[BTNS_PER_PAGE];
-static lv_obj_t *s_btn_lbls[BTNS_PER_PAGE];
-static lv_obj_t *s_page_lbl;
-static int s_page;
-static int s_page_count;
+
+static lv_obj_t *s_drawer;    /* slides from the left */
+static lv_obj_t *s_scrim;     /* dark overlay behind the drawer */
+static lv_obj_t *s_drawer_list;
+static lv_obj_t *s_drawer_title;
+static bool s_drawer_open;
+
 static bool s_vol_sync;
 static radio_state_t s_last_state = (radio_state_t)-1;
 static bool s_last_buffering;
 static int s_last_station = -1;
-static int s_last_page = -1;
-static int s_last_count = -1;
 static media_list_state_t s_last_list_state = (media_list_state_t)-1;
 static uint32_t s_last_info_color = 0xffffffff;
 static uint32_t s_last_stream_id;
+
+static const char *lstate_text(void);
+static void drawer_close(void);
 
 static void set_text(lv_obj_t *lbl, const char *txt)
 {
@@ -100,76 +113,6 @@ static lv_obj_t *make_card(lv_obj_t *parent, int x, int y, int w, int h)
     lv_obj_set_style_border_width(o, 0, 0);
     lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
     return o;
-}
-
-static void style_station_btn(lv_obj_t *btn, bool selected)
-{
-    lv_obj_set_style_bg_color(btn, lv_color_hex(selected ? C_BTN_SEL : C_BTN), 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(btn, 8, 0);
-    lv_obj_set_style_shadow_width(btn, 0, 0);
-    lv_obj_set_style_pad_all(btn, 0, 0);
-    if (selected) {
-        lv_obj_set_style_border_width(btn, 2, 0);
-        lv_obj_set_style_border_color(btn, lv_color_hex(C_CYAN), 0);
-    } else {
-        lv_obj_set_style_border_width(btn, 0, 0);
-    }
-}
-
-static void station_cb(lv_event_t *e)
-{
-    int idx_in_page = (int)(intptr_t)lv_event_get_user_data(e);
-    int idx = s_page * BTNS_PER_PAGE + idx_in_page;
-    if (idx >= 0 && idx < media_list_count()) {
-        radio_play_tv(idx);
-    }
-}
-
-static void apply_page(void)
-{
-    int count = media_list_count();
-    for (int k = 0; k < BTNS_PER_PAGE; k++) {
-        int idx = s_page * BTNS_PER_PAGE + k;
-        if (idx < count) {
-            lv_obj_remove_flag(s_btns[k], LV_OBJ_FLAG_HIDDEN);
-            set_text(s_btn_lbls[k], media_list_name(idx));
-        } else {
-            lv_obj_add_flag(s_btns[k], LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-    if (s_page_lbl) {
-        char buf[24];
-        snprintf(buf, sizeof(buf), "%d/%d", s_page + 1, s_page_count);
-        set_text(s_page_lbl, buf);
-    }
-}
-
-static void show_page(int page)
-{
-    if (page < 0) {
-        page = 0;
-    }
-    if (page > s_page_count - 1) {
-        page = s_page_count - 1;
-    }
-    if (page == s_page) {
-        return;
-    }
-    s_page = page;
-    apply_page();
-}
-
-static void page_prev_cb(lv_event_t *e)
-{
-    (void)e;
-    show_page(s_page - 1);
-}
-
-static void page_next_cb(lv_event_t *e)
-{
-    (void)e;
-    show_page(s_page + 1);
 }
 
 static void update_vol_label(int vol)
@@ -254,12 +197,12 @@ static void spectrum_draw_cb(lv_event_t *e)
     lv_draw_rect_dsc_t dsc;
     lv_draw_rect_dsc_init(&dsc);
     dsc.bg_opa = LV_OPA_COVER;
-    dsc.radius = 1;
+    dsc.radius = 2;
 
     for (int k = 0; k < SPECTRUM_BANDS; k++) {
         int v = s_spec_draw[k];
         int x1 = a.x1 + k * w / SPECTRUM_BANDS;
-        int x2 = a.x1 + (k + 1) * w / SPECTRUM_BANDS - 2;
+        int x2 = a.x1 + (k + 1) * w / SPECTRUM_BANDS - 3;
         if (x2 < x1) x2 = x1;
         if (x2 > a.x2) x2 = a.x2;
         int bh = 2 + (int)((h - 2) * v / 100);
@@ -290,6 +233,151 @@ static void spectrum_tick_cb(lv_timer_t *t)
     }
 }
 
+/* ------------------------------ drawer ---------------------------- */
+
+static const char *group_name(int g)
+{
+    if (g == 0) return "央视";
+    if (g == 1) return "地方卫视";
+    return "其他";
+}
+
+static void channel_row_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx >= 0 && idx < media_list_count()) {
+        radio_play_tv(idx);
+    }
+    drawer_close();
+}
+
+static void drawer_close_anim_ready(lv_anim_t *a)
+{
+    lv_obj_t *drawer = (lv_obj_t *)a->var;
+    lv_obj_add_flag(drawer, LV_OBJ_FLAG_HIDDEN);
+    if (s_drawer_list) {
+        lv_obj_clean(s_drawer_list);          /* free the channel rows */
+    }
+}
+
+static void drawer_slide(lv_obj_t *drawer, int32_t to, bool hide_at_end)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, drawer);
+    lv_anim_set_values(&a, (int32_t)lv_obj_get_x(drawer), to);
+    lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
+    lv_anim_set_time(&a, 180);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    if (hide_at_end) {
+        lv_anim_set_ready_cb(&a, drawer_close_anim_ready);
+    }
+    lv_anim_start(&a);
+}
+
+static void drawer_open(void)
+{
+    if (s_drawer_open) {
+        return;
+    }
+    s_drawer_open = true;
+    lv_obj_remove_flag(s_scrim, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_drawer, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_scrim);
+    lv_obj_move_foreground(s_drawer);
+
+    /* Build rows on open so the selection highlight is current, and free
+     * them on close (86 rows would hold ~25 KB of the internal heap). */
+    lv_obj_clean(s_drawer_list);
+    int count = media_list_count();
+    char buf[48];
+    snprintf(buf, sizeof(buf), "频道列表 · %d 个", count);
+    set_text(s_drawer_title, buf);
+
+    radio_status_t st;
+    radio_get_status(&st);
+    int last_group = -1;
+    int y = 0;
+    if (count == 0) {
+        make_label(s_drawer_list, TF14, C_DIM, 8, 8, lstate_text());
+        y = 34;
+    }
+    for (int i = 0; i < count; i++) {
+        int g = media_list_group(i);
+        if (g != last_group) {
+            lv_obj_t *h = lv_label_create(s_drawer_list);
+            lv_obj_set_style_text_font(h, TF14, 0);
+            lv_obj_set_style_text_color(h, lv_color_hex(C_AMBER), 0);
+            lv_label_set_text(h, group_name(g));
+            lv_obj_set_pos(h, 8, y + 2);
+            y += 26;
+            last_group = g;
+        }
+        lv_obj_t *row = lv_button_create(s_drawer_list);
+        lv_obj_set_pos(row, 4, y);
+        lv_obj_set_size(row, DRAWER_W - 16, 36);
+        bool sel = (i == st.station &&
+                    (st.state == RADIO_STATE_PLAYING ||
+                     st.state == RADIO_STATE_BUFFERING ||
+                     st.state == RADIO_STATE_PAUSED ||
+                     st.state == RADIO_STATE_CONNECTING));
+        lv_obj_set_style_bg_color(row, lv_color_hex(sel ? C_BTN_SEL : C_BTN), 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(C_BTN_SEL), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(row, 8, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_add_event_cb(row, channel_row_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)i);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_obj_set_style_text_font(lbl, TF14, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(C_TEXT), 0);
+        lv_label_set_text(lbl, media_list_name(i));
+        lv_obj_center(lbl);
+        y += 40;
+    }
+    lv_obj_scroll_to(s_drawer_list, 0, 0, LV_ANIM_OFF);
+
+    drawer_slide(s_drawer, 0, false);
+}
+
+static void drawer_close(void)
+{
+    if (!s_drawer_open) {
+        return;
+    }
+    s_drawer_open = false;
+    lv_obj_add_flag(s_scrim, LV_OBJ_FLAG_HIDDEN);
+    drawer_slide(s_drawer, -DRAWER_W, true);
+}
+
+static void scrim_cb(lv_event_t *e)
+{
+    (void)e;
+    drawer_close();
+}
+
+static void open_cb(lv_event_t *e)
+{
+    (void)e;
+    drawer_open();
+}
+
+/* ------------------------------ tick ------------------------------ */
+
+static const char *lstate_text(void)
+{
+    media_list_state_t lstate = media_list_state();
+    if (lstate == MEDIA_LIST_LOADING) {
+        return "列表加载中...";
+    }
+    if (lstate == MEDIA_LIST_FAILED) {
+        return "列表加载失败";
+    }
+    return "列表待加载";
+}
+
 static void tick_cb(lv_timer_t *t)
 {
     (void)t;
@@ -298,42 +386,23 @@ static void tick_cb(lv_timer_t *t)
     int count = media_list_count();
     media_list_state_t lstate = media_list_state();
 
-    /* Follow preset changes started elsewhere (engine prev/next). */
+    /* Follow channel changes started elsewhere (engine prev/next). */
     if (st.stream_id != s_last_stream_id) {
         s_last_stream_id = st.stream_id;
-        if (st.station >= 0 && st.station < count) {
-            int want = st.station / BTNS_PER_PAGE;
-            if (want != s_page) {
-                show_page(want);
-            }
-        }
+        set_text(s_now, st.name[0] ? st.name : "未选择频道");
     }
 
-    /* Recompute pager when the playlist size changes. */
-    if (count != s_last_count) {
-        s_last_count = count;
-        s_page_count = (count + BTNS_PER_PAGE - 1) / BTNS_PER_PAGE;
-        if (s_page >= s_page_count) {
-            s_page = s_page_count - 1;
-        }
-        if (s_page < 0) s_page = 0;
-        apply_page();
-    }
-
-    /* Playlist load state (next to the pager). */
-    const char *lst = "列表待加载";
+    /* Playlist load state (top right, next to the play state). */
+    const char *lst = lstate_text();
     uint32_t lcolor = C_DIM;
     if (lstate == MEDIA_LIST_LOADING) {
-        lst = "列表加载中...";
         lcolor = C_AMBER;
-    } else if (lstate == MEDIA_LIST_OK) {
-        static char lstbuf[40];
-        snprintf(lstbuf, sizeof(lstbuf), "共 %d 个频道", count);
-        lst = lstbuf;
-        lcolor = C_DIM;
     } else if (lstate == MEDIA_LIST_FAILED) {
-        lst = "列表加载失败";
         lcolor = C_RED;
+    } else if (lstate == MEDIA_LIST_OK && s_last_list_state != MEDIA_LIST_OK) {
+        static char lstbuf[48];
+        snprintf(lstbuf, sizeof(lstbuf), "%d 个频道", count);
+        lst = lstbuf;
     }
     if (lstate != s_last_list_state) {
         lv_obj_set_style_text_color(s_list, lv_color_hex(lcolor), 0);
@@ -386,15 +455,15 @@ static void tick_cb(lv_timer_t *t)
         set_text(s_info, st.error[0] ? st.error : "连接失败");
         info_color = C_RED;
     } else if (st.sample_rate > 0) {
-        snprintf(buf, sizeof(buf), "%d kbps · %.1f kHz", st.bitrate_kbps,
-                 st.sample_rate / 1000.0f);
+        snprintf(buf, sizeof(buf), "%d kbps · %.1f kHz · %d ch", st.bitrate_kbps,
+                 st.sample_rate / 1000.0f, st.channels);
         set_text(s_info, buf);
         info_color = C_CYAN;
     } else if (st.state == RADIO_STATE_CONNECTING) {
         set_text(s_info, "正在连接...");
         info_color = C_AMBER;
     } else {
-        set_text(s_info, "点击频道开始播放");
+        set_text(s_info, "点击这里打开频道列表换台");
     }
     if (info_color != s_last_info_color) {
         lv_obj_set_style_text_color(s_info, lv_color_hex(info_color), 0);
@@ -406,15 +475,6 @@ static void tick_cb(lv_timer_t *t)
     lv_bar_set_value(s_buf_bar, st.buffer_pct, LV_ANIM_OFF);
 
     set_text(s_play_lbl, active ? "暂停" : "播放");
-
-    if (st.station != s_last_station || s_page != s_last_page) {
-        for (int k = 0; k < BTNS_PER_PAGE; k++) {
-            int idx = s_page * BTNS_PER_PAGE + k;
-            style_station_btn(s_btns[k], idx == st.station && idx < count);
-        }
-        s_last_station = st.station;
-        s_last_page = s_page;
-    }
 }
 
 void tv_ui_build(lv_obj_t *parent)
@@ -427,86 +487,84 @@ void tv_ui_build(lv_obj_t *parent)
 
     make_label(parent, F20, C_TEXT, 12, 2, "网络电视");
     s_status = make_label(parent, TF14, C_DIM, 0, 0, "已停止");
-    lv_obj_align(s_status, LV_ALIGN_TOP_RIGHT, -12, 6);
+    lv_obj_align(s_status, LV_ALIGN_TOP_RIGHT, -78, 6);
+    s_list = make_label(parent, TF14, C_DIM, 0, 0, lstate_text());
+    lv_obj_align(s_list, LV_ALIGN_TOP_RIGHT, -152, 6);
+    make_ctrl_button(parent, 396, 1, 66, 24, "刷新列表", F14, reload_cb);
 
-    /* channel grid: 8 buttons, one page at a time */
-    s_page = 0;
-    s_page_count = 1;
-    for (int k = 0; k < BTNS_PER_PAGE; k++) {
-        int col = k % 2;
-        int row = k / 2;
-        int x = 10 + col * 134;
-        int y = 38 + row * 47;
-        lv_obj_t *btn = lv_button_create(parent);
-        lv_obj_set_pos(btn, x, y);
-        lv_obj_set_size(btn, 128, 42);
-        style_station_btn(btn, false);
-        lv_obj_add_event_cb(btn, station_cb, LV_EVENT_CLICKED, (void *)(intptr_t)k);
-
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_obj_set_style_text_font(lbl, TF14, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(C_TEXT), 0);
-        lv_label_set_text(lbl, "");
-        lv_obj_center(lbl);
-        s_btns[k] = btn;
-        s_btn_lbls[k] = lbl;
-        lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);   /* shown when the list loads */
-    }
-
-    /* header pager + playlist state + refresh */
-    make_ctrl_button(parent, 208, 1, 32, 24, "<", F14, page_prev_cb);
-    s_page_lbl = make_label(parent, F14, C_TEXT, 242, 7, "1/1");
-    lv_obj_set_width(s_page_lbl, 32);
-    lv_obj_set_style_text_align(s_page_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    make_ctrl_button(parent, 278, 1, 32, 24, ">", F14, page_next_cb);
-
-    s_list = make_label(parent, TF14, C_DIM, 0, 0, "列表待加载");
-    lv_obj_align(s_list, LV_ALIGN_TOP_RIGHT, -78, 6);
-    make_ctrl_button(parent, 406, 1, 52, 24, "刷新", F14, reload_cb);
-
-    /* now-playing card */
-    lv_obj_t *card = make_card(parent, 278, 38, 192, 194);
-    make_label(card, TF14, C_DIM, 10, 4, "电视直播");
-    s_now = make_label(card, TF14, C_TEXT, 10, 22, "未选择频道");
-    lv_obj_set_width(s_now, 172);
-    lv_label_set_long_mode(s_now, LV_LABEL_LONG_WRAP);
-    s_info = make_label(card, TF14, C_DIM, 10, 56, "点击频道开始播放");
+    /* big now-playing panel, tap to open the channel drawer */
+    lv_obj_t *card = make_card(parent, 10, 36, 460, 150);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(card, open_cb, LV_EVENT_CLICKED, NULL);
+    s_now = make_label(card, TF14, C_TEXT, 16, 6, "未选择频道");
+    s_info = make_label(card, TF14, C_DIM, 16, 26, "点击这里打开频道列表换台");
 
     s_spec = lv_obj_create(card);
     lv_obj_remove_style_all(s_spec);
-    lv_obj_set_pos(s_spec, 10, 74);
-    lv_obj_set_size(s_spec, 172, 52);
+    lv_obj_set_pos(s_spec, 16, 48);
+    lv_obj_set_size(s_spec, 428, 88);
     lv_obj_remove_flag(s_spec, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(s_spec, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_spec, spectrum_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
 
-    s_buf_lbl = make_label(card, TF14, C_DIM, 10, 132, "缓冲 0%");
+    s_buf_lbl = make_label(card, TF14, C_DIM, 16, 126, "缓冲 0%");
     s_buf_bar = lv_bar_create(card);
-    lv_obj_set_pos(s_buf_bar, 84, 134);
-    lv_obj_set_size(s_buf_bar, 98, 8);
+    lv_obj_set_pos(s_buf_bar, 90, 128);
+    lv_obj_set_size(s_buf_bar, 354, 8);
     lv_bar_set_range(s_buf_bar, 0, 100);
     lv_obj_set_style_bg_color(s_buf_bar, lv_color_hex(0x0b1b33), LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_buf_bar, lv_color_hex(C_CYAN), LV_PART_INDICATOR);
     lv_obj_set_style_radius(s_buf_bar, 4, LV_PART_MAIN);
     lv_obj_set_style_radius(s_buf_bar, 4, LV_PART_INDICATOR);
 
-    s_play_lbl = make_ctrl_button(card, 10, 152, 84, 34, "播放", TF14, play_cb);
-    make_ctrl_button(card, 100, 152, 38, 34, "<", F20, prev_cb);
-    make_ctrl_button(card, 144, 152, 38, 34, ">", F20, next_cb);
-
-    /* volume */
-    make_label(parent, F14, C_DIM, 14, 250, "音量");
+    /* controls */
+    s_play_lbl = make_ctrl_button(parent, 10, 196, 90, 40, "播放", TF14, play_cb);
+    make_ctrl_button(parent, 106, 196, 44, 40, "<", F20, prev_cb);
+    make_ctrl_button(parent, 156, 196, 44, 40, ">", F20, next_cb);
+    make_label(parent, F14, C_DIM, 216, 206, "音量");
     s_vol = lv_slider_create(parent);
-    lv_obj_set_pos(s_vol, 58, 252);
-    lv_obj_set_size(s_vol, 240, 12);
+    lv_obj_set_pos(s_vol, 262, 208);
+    lv_obj_set_size(s_vol, 160, 14);
     lv_slider_set_range(s_vol, 0, 100);
     lv_slider_set_value(s_vol, audio_get_vol(), LV_ANIM_OFF);
     lv_obj_set_style_bg_color(s_vol, lv_color_hex(0x223a5e), LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_vol, lv_color_hex(C_CYAN), LV_PART_INDICATOR);
     lv_obj_add_event_cb(s_vol, vol_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    s_vol_lbl = make_label(parent, F14, C_CYAN, 306, 250, "70");
+    s_vol_lbl = make_label(parent, F14, C_CYAN, 428, 206, "70");
     update_vol_label(audio_get_vol());
-    make_label(parent, F14, C_DIM, 390, 250, "滑动切页");
+
+    make_label(parent, F14, C_DIM, 10, 250, "点中间区域换台 · 左右滑动切页");
+
+    /* scrim + drawer (created after the main UI so they sit on top) */
+    s_scrim = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_scrim);
+    lv_obj_set_pos(s_scrim, 0, 0);
+    lv_obj_set_size(s_scrim, 480, 284);
+    lv_obj_set_style_bg_color(s_scrim, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_scrim, LV_OPA_60, 0);
+    lv_obj_add_flag(s_scrim, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_scrim, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(s_scrim, scrim_cb, LV_EVENT_CLICKED, NULL);
+
+    s_drawer = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_drawer);
+    lv_obj_set_pos(s_drawer, -DRAWER_W, 0);
+    lv_obj_set_size(s_drawer, DRAWER_W, 284);
+    lv_obj_set_style_bg_color(s_drawer, lv_color_hex(C_DRAWER), 0);
+    lv_obj_set_style_bg_opa(s_drawer, LV_OPA_COVER, 0);
+    lv_obj_add_flag(s_drawer, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_drawer, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_drawer_title = make_label(s_drawer, TF14, C_TEXT, 12, 10, "频道列表");
+    make_ctrl_button(s_drawer, DRAWER_W - 74, 6, 62, 26, "收起", F14, scrim_cb);
+
+    s_drawer_list = lv_obj_create(s_drawer);
+    lv_obj_remove_style_all(s_drawer_list);
+    lv_obj_set_pos(s_drawer_list, 4, 38);
+    lv_obj_set_size(s_drawer_list, DRAWER_W - 8, 284 - 44);
+    lv_obj_add_flag(s_drawer_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_drawer_list, LV_DIR_VER);
+    /* rows are built in drawer_open() and freed on close */
 
     lv_timer_create(tick_cb, 200, NULL);
     lv_timer_create(spectrum_tick_cb, 33, NULL);

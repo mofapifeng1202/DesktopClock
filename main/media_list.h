@@ -27,4 +27,5 @@ int media_list_count(void);
 const char *media_list_name(int idx);      /* "" when out of range */
 const char *media_list_url(int idx);       /* "" when out of range */
 media_type_t media_list_type(int idx);     /* MEDIA_UDP when out of range */
+int media_list_group(int idx);             /* 0=央视 1=地方卫视 2=其他 */
 const char *media_list_source(void);       /* configured playlist URL */

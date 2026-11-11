@@ -53,6 +53,7 @@ typedef struct {
     char *name;
     char *url;
     media_type_t type;
+    int group;                    /* 0=央视 1=地方卫视 2=其他 */
 } media_entry_t;
 
 static media_entry_t *s_entries;      /* PSRAM, swapped in after full parse */
@@ -124,6 +125,29 @@ static media_type_t classify_url(const char *url)
         return MEDIA_TS;
     }
     return MEDIA_TS;
+}
+
+/* Channel grouping: 央视 first, then provincial (卫视), then the rest. */
+static int group_of(const char *name)
+{
+    if (strncasecmp(name, "CCTV", 4) == 0 || strncasecmp(name, "CGTN", 4) == 0 ||
+        strstr(name, "央视") != NULL) {
+        return 0;
+    }
+    if (strstr(name, "卫视") != NULL) {
+        return 1;
+    }
+    return 2;
+}
+
+static int entry_cmp(const void *a, const void *b)
+{
+    const media_entry_t *ea = a;
+    const media_entry_t *eb = b;
+    if (ea->group != eb->group) {
+        return ea->group - eb->group;
+    }
+    return strcmp(ea->name, eb->name);
 }
 
 static void free_entries(media_entry_t *entries, int count)
@@ -199,9 +223,12 @@ static int parse_m3u(char *text, media_entry_t **out)
         entries[count].name = name;
         entries[count].url = url;
         entries[count].type = classify_url(url);
+        entries[count].group = group_of(name);
         pending_name[0] = '\0';
         count++;
     }
+    /* 央视 -> 地方卫视 -> 其他, name order within each group. */
+    qsort(entries, count, sizeof(entries[0]), entry_cmp);
     *out = entries;
     return count;
 }
@@ -369,6 +396,14 @@ media_type_t media_list_type(int idx)
         return MEDIA_UDP;
     }
     return s_entries[idx].type;
+}
+
+int media_list_group(int idx)
+{
+    if (idx < 0 || idx >= s_count || s_entries == NULL) {
+        return 2;
+    }
+    return s_entries[idx].group;
 }
 
 const char *media_list_source(void)

@@ -58,7 +58,7 @@ static const char *TAG = "radio";
 
 #define RADIO_STATION_COUNT ((int)(sizeof(k_radio_stations) / sizeof(k_radio_stations[0])))
 
-#define RING_CAP          (128 * 1024)
+#define RING_CAP          (384 * 1024)
 #define IN_CAP            (16 * 1024)
 #define PREBUFFER_BYTES   (24 * 1024)
 #define READ_CHUNK        4096
@@ -204,13 +204,17 @@ static void set_info(int bitrate_kbps, int sample_rate, int channels)
 {
     bool changed = false;
     status_lock();
+    /* VBR jitters the per-frame bitrate; quantize so the UI label doesn't
+     * churn, and only log when the sample rate actually changes. */
+    bitrate_kbps = (bitrate_kbps + 4) & ~7;
     if (s_status.bitrate_kbps != bitrate_kbps ||
         s_status.sample_rate != sample_rate ||
         s_status.channels != channels) {
+        bool rate_changed = s_status.sample_rate != sample_rate;
         s_status.bitrate_kbps = bitrate_kbps;
         s_status.sample_rate = sample_rate;
         s_status.channels = channels;
-        changed = true;
+        changed = rate_changed;
     }
     status_unlock();
     if (changed && sample_rate > 0) {
@@ -659,9 +663,21 @@ static int decode_ts_chunk(void)
             }
         }
         if (out.decoded_size > 0) {
+            /* Reconfigure the codec when the decoded rate changes — without
+             * this a 44.1 kHz IPTV stream plays at the boot-time 16 kHz
+             * (sounds like slow motion). */
+            esp_audio_simple_dec_info_t info;
+            int ch = 2;
+            if (esp_audio_simple_dec_get_info(s_sdec, &info) == ESP_AUDIO_ERR_OK) {
+                ch = apply_stream_info((int)info.sample_rate, (int)info.channel,
+                                       (int)info.bitrate);
+                if (ch < 0) {
+                    return written > 0 ? written : -1;
+                }
+            }
             int shorts = (int)(out.decoded_size / 2);
             const int16_t *pcm = s_dec_pcm;
-            if (s_cur_ch == 1 && shorts > 0) {
+            if (ch == 1 && shorts > 0) {
                 if ((size_t)shorts > s_stereo_size) {
                     shorts = (int)s_stereo_size;
                 }
@@ -726,13 +742,18 @@ static esp_http_client_handle_t http_open(const char *url, bool icy_off)
 }
 
 /* Open + handle redirects + verify HTTP 200. Returns true when the client is
- * ready for esp_http_client_read(). */
-static bool http_connect(esp_http_client_handle_t client, int *out_code)
+ * ready for esp_http_client_read(). quiet=true suppresses the error state so
+ * the caller can skip a dead HLS segment instead of killing the stream. */
+static bool http_connect(esp_http_client_handle_t client, int *out_code, bool quiet)
 {
     for (int hop = 0; hop < 5 && !s_stop_req; hop++) {
         esp_err_t err = esp_http_client_open(client, 0);
         if (err != ESP_OK) {
-            set_error("连接失败 (%s)", esp_err_to_name(err));
+            if (quiet) {
+                ESP_LOGW(TAG, "connect failed (%s)", esp_err_to_name(err));
+            } else {
+                set_error("连接失败 (%s)", esp_err_to_name(err));
+            }
             return false;
         }
         esp_http_client_fetch_headers(client);
@@ -744,12 +765,12 @@ static bool http_connect(esp_http_client_handle_t client, int *out_code)
                 ESP_LOGI(TAG, "HTTP %d redirect -> %s", code, loc);
                 esp_http_client_close(client);
                 if (esp_http_client_set_url(client, loc) != ESP_OK) {
-                    set_error("重定向地址无效");
+                    if (!quiet) set_error("重定向地址无效");
                     return false;
                 }
                 continue;
             }
-            set_error("重定向缺少 Location");
+            if (!quiet) set_error("重定向缺少 Location");
             return false;
         }
         char *ctype = NULL;
@@ -758,7 +779,8 @@ static bool http_connect(esp_http_client_handle_t client, int *out_code)
         ESP_LOGI(TAG, "HTTP %d, type=%s, length=%lld", code,
                  ctype ? ctype : "?", (long long)len);
         if (code != 200) {
-            set_error("HTTP %d", code);
+            if (!quiet) set_error("HTTP %d", code);
+            else ESP_LOGW(TAG, "segment HTTP %d", code);
             return false;
         }
         if (out_code) {
@@ -835,7 +857,7 @@ static bool http_get_to_buf(const char *url, char *buf, size_t bufsize, int *out
     }
     bool ok = false;
     *out_len = 0;
-    if (http_connect(client, NULL)) {
+    if (http_connect(client, NULL, false)) {
         esp_http_client_set_timeout_ms(client, HTTP_READ_MS);
         int total = 0;
         while (total < (int)bufsize - 1 && !s_stop_req) {
@@ -921,6 +943,7 @@ static void stream_hls(const char *url)
     uint32_t last_seq = 0;
     bool have_last = false;
     bool first_fetch = true;
+    int no_new = 0;
 
     while (!s_stop_req) {
         int len = 0;
@@ -931,7 +954,6 @@ static void stream_hls(const char *url)
             break;
         }
 
-        int target_dur = 4;
         uint32_t media_seq = 0;
         bool endlist = false;
         int seg_count = 0;
@@ -947,9 +969,7 @@ static void stream_hls(const char *url)
                 continue;
             }
             if (strncmp(line, "#EXT-X-TARGETDURATION:", 22) == 0) {
-                target_dur = atoi(line + 22);
-                if (target_dur < 1) target_dur = 1;
-                if (target_dur > 30) target_dur = 30;
+                /* parsed for completeness; segment polling is time-based */
             } else if (strncmp(line, "#EXT-X-MEDIA-SEQUENCE:", 22) == 0) {
                 media_seq = (uint32_t)strtoul(line + 22, NULL, 10);
             } else if (strncmp(line, "#EXT-X-MAP:", 11) == 0) {
@@ -969,6 +989,7 @@ static void stream_hls(const char *url)
         }
 
         bool advanced = false;
+        int seg_fail = 0;
         for (int i = 0; i < seg_count && !s_stop_req; i++) {
             uint32_t seq = media_seq + (uint32_t)i;
             if (have_last && seq <= last_seq) {
@@ -984,10 +1005,17 @@ static void stream_hls(const char *url)
                 set_error("HTTP 初始化失败");
                 goto done;
             }
-            if (!http_connect(client, NULL)) {
+            if (!http_connect(client, NULL, true)) {
+                /* A live window may have rotated past this segment; skip it
+                 * instead of killing the whole stream. */
                 esp_http_client_cleanup(client);
-                goto done;
+                if (++seg_fail >= 3) {
+                    set_error("分段获取失败");
+                    goto done;
+                }
+                continue;
             }
+            seg_fail = 0;
             esp_http_client_set_timeout_ms(client, HTTP_READ_MS);
             if (first_fetch || !have_last) {
                 set_state(RADIO_STATE_BUFFERING, NULL);
@@ -1004,23 +1032,26 @@ static void stream_hls(const char *url)
             }
         }
 
-        if (endlist) {
+        if (endlist && !advanced) {
+            break;                        /* finite playlist fully played */
+        }
+        /* Live playlist: poll for new segments quickly instead of waiting a
+         * whole target duration (a 1.5 s ring cushion must not be drained by
+         * a 6-10 s wait). Give up after ~60 s without new segments. */
+        no_new = advanced ? 0 : no_new + 1;
+        if (no_new > 30) {
+            ESP_LOGW(TAG, "no new HLS segments for 60 s, stopping");
             break;
         }
-
-        /* Live: wait ~one target duration, then refresh the playlist. */
         int waited = 0;
-        while (waited < target_dur * 1000 && !s_stop_req) {
+        while (waited < 2000 && !s_stop_req) {
             radio_msg_t pending;
             if (xQueuePeek(s_queue, &pending, 0) == pdTRUE) {
                 s_stop_req = true;
                 break;
             }
-            vTaskDelay(pdMS_TO_TICKS(200));
-            waited += 200;
-        }
-        if (!advanced && !s_stop_req) {
-            vTaskDelay(pdMS_TO_TICKS(500));
+            vTaskDelay(pdMS_TO_TICKS(100));
+            waited += 100;
         }
     }
 
@@ -1086,9 +1117,12 @@ static void start_stream(const char *name, const char *url, media_type_t type, i
     set_info(0, 0, 0);
     set_buffer(0);
     set_buffering(false);
-    /* IPTV (TS/HLS) carries video bytes too, so a 24 KB prebuffer is only
-     * ~100 ms of stream — too little between HLS segments. Buffer deeper. */
-    s_prebuffer_target = (type == MEDIA_MP3) ? PREBUFFER_BYTES : 100 * 1024;
+    /* IPTV (TS/HLS) carries video bytes too — the player must consume the
+     * whole TS (≈2 Mbps) to get the ~130 kbps audio, so a small prebuffer
+     * drains in a fraction of a second across HLS segment gaps. Buffer to
+     * 90% of the ring (~1.5 s) before starting playback. */
+    s_prebuffer_target = (type == MEDIA_MP3) ? PREBUFFER_BYTES
+                                             : (int)(RING_CAP * 9 / 10);
     /* Set the decoder type before bumping stream_id: the play task re-inits
      * the decoder when it sees the new stream id. */
     s_active_type = type;
@@ -1105,7 +1139,7 @@ static void start_stream(const char *name, const char *url, media_type_t type, i
         if (client == NULL) {
             set_error("HTTP 初始化失败");
         } else {
-            if (http_connect(client, NULL)) {
+            if (http_connect(client, NULL, false)) {
                 esp_http_client_set_timeout_ms(client, HTTP_READ_MS);
                 set_state(RADIO_STATE_BUFFERING, NULL);
                 http_body_to_ring(client);
@@ -1372,6 +1406,16 @@ void radio_play(int station)
     if (s_queue == NULL) {
         return;
     }
+    /* Ghost taps on this panel are frequent; a repeat request for the
+     * already-playing station must not abort the current stream. */
+    radio_status_t st;
+    radio_get_status(&st);
+    if (s_ctx == CTX_PRESET && st.station == station &&
+        (st.state == RADIO_STATE_PLAYING ||
+         st.state == RADIO_STATE_BUFFERING ||
+         st.state == RADIO_STATE_CONNECTING)) {
+        return;
+    }
     s_ctx = CTX_PRESET;
     radio_msg_t m = {.cmd = CMD_PLAY, .arg = station};
     xQueueSend(s_queue, &m, 0);
@@ -1380,6 +1424,14 @@ void radio_play(int station)
 void radio_play_tv(int idx)
 {
     if (s_queue == NULL) {
+        return;
+    }
+    radio_status_t st;
+    radio_get_status(&st);
+    if (s_ctx == CTX_TV && st.station == idx &&
+        (st.state == RADIO_STATE_PLAYING ||
+         st.state == RADIO_STATE_BUFFERING ||
+         st.state == RADIO_STATE_CONNECTING)) {
         return;
     }
     s_ctx = CTX_TV;
