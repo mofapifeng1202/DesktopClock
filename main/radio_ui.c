@@ -23,6 +23,7 @@
 #include "main.h"
 #include "radio.h"
 #include "radio_ui.h"
+#include "spectrum.h"
 
 LV_FONT_DECLARE(font_radio_14);
 LV_FONT_DECLARE(font_radio_20);
@@ -48,7 +49,8 @@ static lv_obj_t *s_genre;
 static lv_obj_t *s_info;
 static lv_obj_t *s_buf_lbl;
 static lv_obj_t *s_buf_bar;
-static lv_obj_t *s_level_bar;
+static lv_obj_t *s_spec;
+static uint8_t s_spec_draw[SPECTRUM_BANDS];
 static lv_obj_t *s_play_lbl;
 static lv_obj_t *s_vol;
 static lv_obj_t *s_vol_lbl;
@@ -220,6 +222,44 @@ static void next_cb(lv_event_t *e)
     radio_next();
 }
 
+/* Spectrum bars, drawn directly: 16 columns, height = band value (0..100). */
+static void spectrum_draw_cb(lv_event_t *e)
+{
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_obj_t *obj = lv_event_get_current_target_obj(e);
+    lv_area_t a;
+    lv_obj_get_coords(obj, &a);
+    int w = a.x2 - a.x1 + 1;
+    int h = a.y2 - a.y1 + 1;
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_opa = LV_OPA_COVER;
+    dsc.radius = 1;
+
+    for (int k = 0; k < SPECTRUM_BANDS; k++) {
+        int v = s_spec_draw[k];
+        int x1 = a.x1 + k * w / SPECTRUM_BANDS;
+        int x2 = a.x1 + (k + 1) * w / SPECTRUM_BANDS - 2;
+        if (x2 < x1) x2 = x1;
+        if (x2 > a.x2) x2 = a.x2;
+        int bh = 2 + (int)((h - 2) * v / 100);
+        if (bh > h) bh = h;
+        lv_area_t bar = { x1, a.y2 - bh + 1, x2, a.y2 };
+        if (v < 50) {
+            dsc.bg_color = lv_color_hex(0x24d17e);
+        } else if (v < 80) {
+            dsc.bg_color = lv_color_hex(0xffd479);
+        } else {
+            dsc.bg_color = lv_color_hex(0xff5c5c);
+        }
+        lv_draw_rect(layer, &dsc, &bar);
+    }
+}
+
 static lv_obj_t *make_ctrl_button(lv_obj_t *parent, int x, int y, int w, int h,
                                   const char *txt, const lv_font_t *font,
                                   lv_event_cb_t cb)
@@ -335,7 +375,16 @@ static void tick_cb(lv_timer_t *t)
     snprintf(buf, sizeof(buf), "缓冲 %d%%", st.buffer_pct);
     set_text(s_buf_lbl, buf);
     lv_bar_set_value(s_buf_bar, st.buffer_pct, LV_ANIM_OFF);
-    lv_bar_set_value(s_level_bar, st.level, LV_ANIM_OFF);
+
+    /* spectrum bars: invalidate only when a value actually moved */
+    uint8_t spec[SPECTRUM_BANDS];
+    spectrum_copy(spec);
+    if (memcmp(spec, s_spec_draw, sizeof(spec)) != 0) {
+        memcpy(s_spec_draw, spec, sizeof(spec));
+        if (s_spec) {
+            lv_obj_invalidate(s_spec);
+        }
+    }
 
     set_text(s_play_lbl, active ? "暂停" : "播放");
 
@@ -398,31 +447,30 @@ void radio_ui_build(lv_obj_t *parent)
 
     /* now-playing card */
     lv_obj_t *card = make_card(parent, 278, 38, 192, 194);
-    s_genre = make_label(card, F14, C_DIM, 10, 6, "正在播放");
-    s_now = make_label(card, F20, C_TEXT, 10, 25, "未选择电台");
+    s_genre = make_label(card, F14, C_DIM, 10, 4, "正在播放");
+    s_now = make_label(card, F20, C_TEXT, 10, 20, "未选择电台");
     lv_obj_set_width(s_now, 172);
     lv_label_set_long_mode(s_now, LV_LABEL_LONG_WRAP);
-    s_info = make_label(card, F14, C_DIM, 10, 74, "等待连接");
+    s_info = make_label(card, F14, C_DIM, 10, 48, "等待连接");
 
-    s_buf_lbl = make_label(card, F14, C_DIM, 10, 96, "缓冲 0%");
+    /* spectrum: 16 log-spaced bands, fed by the play task's FFT */
+    s_spec = lv_obj_create(card);
+    lv_obj_remove_style_all(s_spec);
+    lv_obj_set_pos(s_spec, 10, 64);
+    lv_obj_set_size(s_spec, 172, 58);
+    lv_obj_remove_flag(s_spec, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_spec, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_spec, spectrum_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+
+    s_buf_lbl = make_label(card, F14, C_DIM, 10, 126, "缓冲 0%");
     s_buf_bar = lv_bar_create(card);
-    lv_obj_set_pos(s_buf_bar, 10, 116);
-    lv_obj_set_size(s_buf_bar, 172, 8);
+    lv_obj_set_pos(s_buf_bar, 84, 128);
+    lv_obj_set_size(s_buf_bar, 98, 8);
     lv_bar_set_range(s_buf_bar, 0, 100);
     lv_obj_set_style_bg_color(s_buf_bar, lv_color_hex(0x0b1b33), LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_buf_bar, lv_color_hex(C_CYAN), LV_PART_INDICATOR);
     lv_obj_set_style_radius(s_buf_bar, 4, LV_PART_MAIN);
     lv_obj_set_style_radius(s_buf_bar, 4, LV_PART_INDICATOR);
-
-    make_label(card, F14, C_DIM, 10, 132, "电平");
-    s_level_bar = lv_bar_create(card);
-    lv_obj_set_pos(s_level_bar, 48, 134);
-    lv_obj_set_size(s_level_bar, 134, 8);
-    lv_bar_set_range(s_level_bar, 0, 100);
-    lv_obj_set_style_bg_color(s_level_bar, lv_color_hex(0x0b1b33), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_level_bar, lv_color_hex(C_GREEN), LV_PART_INDICATOR);
-    lv_obj_set_style_radius(s_level_bar, 4, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_level_bar, 4, LV_PART_INDICATOR);
 
     s_play_lbl = make_ctrl_button(card, 10, 152, 84, 34, "播放", F14, play_cb);
     make_ctrl_button(card, 100, 152, 38, 34, "<", F20, prev_cb);

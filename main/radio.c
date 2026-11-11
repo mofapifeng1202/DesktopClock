@@ -34,6 +34,7 @@
 #include "main.h"
 #include "radio.h"
 #include "radio_stations.h"
+#include "spectrum.h"
 #include "wifi_app.h"
 
 static const char *TAG = "radio";
@@ -344,6 +345,8 @@ static void reset_decoder(void)
     s_cur_ch = 2;
     s_bad_frames = 0;
     s_underflow_retries = 0;
+    /* Bars fall while the new stream is connecting. */
+    spectrum_reset(0);
     if (s_decoder == NULL) {
         set_error("MP3 解码器初始化失败");
     }
@@ -454,8 +457,10 @@ static int decode_one_frame(void)
         }
         s_cur_rate = info.samprate;
         s_cur_ch = 2;
+        spectrum_reset(info.samprate);
     }
 
+    spectrum_feed_frame(s_pcm, samples);
     set_info(info.bitrate / 1000, info.samprate, info.nChans);
     set_buffering(false);
     return samples;
@@ -720,6 +725,7 @@ static void play_task(void *arg)
                 was_active = false;
                 set_buffering(false);
             }
+            spectrum_idle();
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
@@ -741,6 +747,7 @@ static void play_task(void *arg)
                 set_buffering(true);
                 s_underruns++;
             }
+            spectrum_idle();
             if (audio_is_ready()) {
                 audio_stream_silence(20);
             } else {
