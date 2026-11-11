@@ -30,11 +30,9 @@
 
 LV_FONT_DECLARE(font_radio_14);
 LV_FONT_DECLARE(font_radio_20);
-LV_FONT_DECLARE(lv_font_source_han_sans_sc_16_cjk);
 
 #define F14     (&font_radio_14)
 #define F20     (&font_radio_20)
-#define TF14    (&s_tv_font)   /* 14 px + CJK fallback for playlist names */
 
 #define C_TEXT  0xffffff
 #define C_DIM   0x6f86a6
@@ -48,8 +46,6 @@ LV_FONT_DECLARE(lv_font_source_han_sans_sc_16_cjk);
 #define C_DRAWER 0x0e2038
 
 #define DRAWER_W 320
-
-static lv_font_t s_tv_font;   /* RAM copy of font_radio_14 + CJK fallback */
 
 static lv_obj_t *s_status;    /* play state */
 static lv_obj_t *s_list;      /* playlist load state */
@@ -70,8 +66,7 @@ static lv_obj_t *s_drawer_title;
 static bool s_drawer_open;
 
 static bool s_vol_sync;
-static radio_state_t s_last_state = (radio_state_t)-1;
-static bool s_last_buffering;
+static char s_last_status_txt[16] = "已停止";
 static int s_last_station = -1;
 static media_list_state_t s_last_list_state = (media_list_state_t)-1;
 static uint32_t s_last_info_color = 0xffffffff;
@@ -136,19 +131,19 @@ static void vol_cb(lv_event_t *e)
 static void play_cb(lv_event_t *e)
 {
     (void)e;
-    radio_toggle_pause();
+    radio_pause_toggle(CTX_TV);
 }
 
 static void prev_cb(lv_event_t *e)
 {
     (void)e;
-    radio_prev();
+    radio_prev(CTX_TV);
 }
 
 static void next_cb(lv_event_t *e)
 {
     (void)e;
-    radio_next();
+    radio_next(CTX_TV);
 }
 
 static void reload_cb(lv_event_t *e)
@@ -299,14 +294,14 @@ static void drawer_open(void)
     int last_group = -1;
     int y = 0;
     if (count == 0) {
-        make_label(s_drawer_list, TF14, C_DIM, 8, 8, lstate_text());
+        make_label(s_drawer_list, F14, C_DIM, 8, 8, lstate_text());
         y = 34;
     }
     for (int i = 0; i < count; i++) {
         int g = media_list_group(i);
         if (g != last_group) {
             lv_obj_t *h = lv_label_create(s_drawer_list);
-            lv_obj_set_style_text_font(h, TF14, 0);
+            lv_obj_set_style_text_font(h, F14, 0);
             lv_obj_set_style_text_color(h, lv_color_hex(C_AMBER), 0);
             lv_label_set_text(h, group_name(g));
             lv_obj_set_pos(h, 8, y + 2);
@@ -331,7 +326,7 @@ static void drawer_open(void)
                             (void *)(intptr_t)i);
 
         lv_obj_t *lbl = lv_label_create(row);
-        lv_obj_set_style_text_font(lbl, TF14, 0);
+        lv_obj_set_style_text_font(lbl, F14, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(C_TEXT), 0);
         lv_label_set_text(lbl, media_list_name(i));
         lv_obj_center(lbl);
@@ -410,44 +405,51 @@ static void tick_cb(lv_timer_t *t)
     }
     set_text(s_list, lst);
 
+    /* Per-page state: this page only reports its own source. When the radio
+     * page is playing instead, say so rather than syncing the play state. */
+    bool page_active = (st.ctx == CTX_TV) &&
+                       (st.state == RADIO_STATE_PLAYING ||
+                        st.state == RADIO_STATE_BUFFERING ||
+                        st.state == RADIO_STATE_CONNECTING);
     const char *status = "已停止";
     uint32_t color = C_DIM;
-    switch (st.state) {
-    case RADIO_STATE_CONNECTING:
-        status = "连接中";
-        color = C_AMBER;
-        break;
-    case RADIO_STATE_BUFFERING:
-        status = "缓冲中";
-        color = C_AMBER;
-        break;
-    case RADIO_STATE_PLAYING:
-        status = st.buffering ? "缓冲中" : "播放中";
-        color = st.buffering ? C_AMBER : C_GREEN;
-        break;
-    case RADIO_STATE_PAUSED:
-        status = "已暂停";
-        color = C_DIM;
-        break;
-    case RADIO_STATE_ERROR:
+    if (st.state == RADIO_STATE_ERROR) {
         status = "出错";
         color = C_RED;
-        break;
-    default:
-        break;
+    } else if (page_active) {
+        switch (st.state) {
+        case RADIO_STATE_CONNECTING:
+            status = "连接中";
+            color = C_AMBER;
+            break;
+        case RADIO_STATE_BUFFERING:
+            status = "缓冲中";
+            color = C_AMBER;
+            break;
+        case RADIO_STATE_PLAYING:
+            status = st.buffering ? "缓冲中" : "播放中";
+            color = st.buffering ? C_AMBER : C_GREEN;
+            break;
+        default:
+            status = "播放中";
+            color = C_GREEN;
+            break;
+        }
+    } else if (st.state == RADIO_STATE_PLAYING ||
+               st.state == RADIO_STATE_BUFFERING ||
+               st.state == RADIO_STATE_CONNECTING) {
+        status = (st.ctx == CTX_PRESET) ? "电台播放中" : "电视播放中";
+    } else if (st.state == RADIO_STATE_PAUSED && st.ctx == CTX_TV) {
+        status = "已暂停";
     }
-    bool visual_changed = (st.state != s_last_state) || (st.buffering != s_last_buffering);
+    bool visual_changed = (strcmp(status, s_last_status_txt) != 0);
     if (visual_changed) {
         lv_obj_set_style_text_color(s_status, lv_color_hex(color), 0);
-        s_last_state = st.state;
-        s_last_buffering = st.buffering;
+        strlcpy(s_last_status_txt, status, sizeof(s_last_status_txt));
     }
     set_text(s_status, status);
 
-    bool active = (st.state == RADIO_STATE_PLAYING ||
-                   st.state == RADIO_STATE_BUFFERING ||
-                   st.state == RADIO_STATE_CONNECTING);
-    set_text(s_now, st.name[0] ? st.name : "未选择频道");
+    set_text(s_now, (st.name[0] && st.ctx == CTX_TV) ? st.name : "未选择频道");
 
     char buf[96];
     uint32_t info_color = C_DIM;
@@ -474,21 +476,18 @@ static void tick_cb(lv_timer_t *t)
     set_text(s_buf_lbl, buf);
     lv_bar_set_value(s_buf_bar, st.buffer_pct, LV_ANIM_OFF);
 
-    set_text(s_play_lbl, active ? "暂停" : "播放");
+    set_text(s_play_lbl, page_active ? "暂停" : "播放");
 }
 
 void tv_ui_build(lv_obj_t *parent)
 {
-    s_tv_font = font_radio_14;
-    s_tv_font.fallback = &lv_font_source_han_sans_sc_16_cjk;
-
     lv_obj_set_style_bg_opa(parent, LV_OPA_TRANSP, 0);
     lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
 
     make_label(parent, F20, C_TEXT, 12, 2, "网络电视");
-    s_status = make_label(parent, TF14, C_DIM, 0, 0, "已停止");
+    s_status = make_label(parent, F14, C_DIM, 0, 0, "已停止");
     lv_obj_align(s_status, LV_ALIGN_TOP_RIGHT, -78, 6);
-    s_list = make_label(parent, TF14, C_DIM, 0, 0, lstate_text());
+    s_list = make_label(parent, F14, C_DIM, 0, 0, lstate_text());
     lv_obj_align(s_list, LV_ALIGN_TOP_RIGHT, -152, 6);
     make_ctrl_button(parent, 396, 1, 66, 24, "刷新列表", F14, reload_cb);
 
@@ -496,8 +495,8 @@ void tv_ui_build(lv_obj_t *parent)
     lv_obj_t *card = make_card(parent, 10, 36, 460, 150);
     lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(card, open_cb, LV_EVENT_CLICKED, NULL);
-    s_now = make_label(card, TF14, C_TEXT, 16, 6, "未选择频道");
-    s_info = make_label(card, TF14, C_DIM, 16, 26, "点击这里打开频道列表换台");
+    s_now = make_label(card, F14, C_TEXT, 16, 6, "未选择频道");
+    s_info = make_label(card, F14, C_DIM, 16, 26, "点击这里打开频道列表换台");
 
     s_spec = lv_obj_create(card);
     lv_obj_remove_style_all(s_spec);
@@ -507,7 +506,7 @@ void tv_ui_build(lv_obj_t *parent)
     lv_obj_remove_flag(s_spec, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_spec, spectrum_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
 
-    s_buf_lbl = make_label(card, TF14, C_DIM, 16, 126, "缓冲 0%");
+    s_buf_lbl = make_label(card, F14, C_DIM, 16, 126, "缓冲 0%");
     s_buf_bar = lv_bar_create(card);
     lv_obj_set_pos(s_buf_bar, 90, 128);
     lv_obj_set_size(s_buf_bar, 354, 8);
@@ -518,7 +517,7 @@ void tv_ui_build(lv_obj_t *parent)
     lv_obj_set_style_radius(s_buf_bar, 4, LV_PART_INDICATOR);
 
     /* controls */
-    s_play_lbl = make_ctrl_button(parent, 10, 196, 90, 40, "播放", TF14, play_cb);
+    s_play_lbl = make_ctrl_button(parent, 10, 196, 90, 40, "播放", F14, play_cb);
     make_ctrl_button(parent, 106, 196, 44, 40, "<", F20, prev_cb);
     make_ctrl_button(parent, 156, 196, 44, 40, ">", F20, next_cb);
     make_label(parent, F14, C_DIM, 216, 206, "音量");
@@ -555,7 +554,7 @@ void tv_ui_build(lv_obj_t *parent)
     lv_obj_add_flag(s_drawer, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_drawer, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_drawer_title = make_label(s_drawer, TF14, C_TEXT, 12, 10, "频道列表");
+    s_drawer_title = make_label(s_drawer, F14, C_TEXT, 12, 10, "频道列表");
     make_ctrl_button(s_drawer, DRAWER_W - 74, 6, 62, 26, "收起", F14, scrim_cb);
 
     s_drawer_list = lv_obj_create(s_drawer);

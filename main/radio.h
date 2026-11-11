@@ -25,6 +25,13 @@ typedef enum {
     MEDIA_UDP,       /* udp/rtp multicast -- not supported, needs udpxy */
 } media_type_t;
 
+/* Which channel list a stream/playback request belongs to. Each UI page
+ * controls and reports only its own source. */
+typedef enum {
+    CTX_PRESET = 0,  /* radio presets (radio_stations.h) */
+    CTX_TV,          /* IPTV channels (media_list) */
+} media_ctx_t;
+
 typedef enum {
     RADIO_STATE_IDLE = 0,
     RADIO_STATE_CONNECTING,
@@ -36,6 +43,7 @@ typedef enum {
 
 typedef struct {
     radio_state_t state;
+    media_ctx_t ctx;          /* which list the current stream belongs to */
     int station;              /* index into the active list */
     char name[48];            /* what is playing right now */
     int bitrate_kbps;
@@ -57,9 +65,9 @@ void radio_start(void);
 
 void radio_play(int station);      /* radio preset (MP3) */
 void radio_play_tv(int idx);       /* TV channel (media_list entry) */
-void radio_toggle_pause(void);
-void radio_next(void);
-void radio_prev(void);
+void radio_pause_toggle(media_ctx_t ctx);  /* play/pause one page's source */
+void radio_next(media_ctx_t ctx);
+void radio_prev(media_ctx_t ctx);
 void radio_stop(void);
 
 void radio_get_status(radio_status_t *out);

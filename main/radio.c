@@ -83,13 +83,9 @@ typedef enum {
     CMD_STOP,
 } radio_cmd_t;
 
-typedef enum {
-    CTX_PRESET = 0,     /* radio presets (radio_stations.h) */
-    CTX_TV,             /* TV channels (media_list) */
-} media_ctx_t;
-
 typedef struct {
     radio_cmd_t cmd;
+    media_ctx_t ctx;
     int arg;
 } radio_msg_t;
 
@@ -253,6 +249,13 @@ static void set_stream_id(uint32_t id)
 {
     status_lock();
     s_status.stream_id = id;
+    status_unlock();
+}
+
+static void set_ctx(media_ctx_t ctx)
+{
+    status_lock();
+    s_status.ctx = ctx;
     status_unlock();
 }
 
@@ -1088,24 +1091,34 @@ static bool tv_get(int idx, const char **name, const char **url, media_type_t *t
     return true;
 }
 
-static bool ctx_get(int idx, const char **name, const char **url, media_type_t *type)
+static bool ctx_get(media_ctx_t ctx, int idx, const char **name, const char **url,
+                    media_type_t *type)
 {
-    if (s_ctx == CTX_TV) {
+    if (ctx == CTX_TV) {
         return tv_get(idx, name, url, type);
     }
     return preset_get(idx, name, url, type);
 }
 
-static int ctx_count(void)
+static int ctx_count(media_ctx_t ctx)
 {
-    if (s_ctx == CTX_TV) {
+    if (ctx == CTX_TV) {
         return media_list_state() == MEDIA_LIST_OK ? media_list_count() : 0;
     }
     return RADIO_STATION_COUNT;
 }
 
-static void start_stream(const char *name, const char *url, media_type_t type, int idx)
+static int s_last_preset;    /* last selected radio preset */
+static int s_last_tv;        /* last selected TV channel */
+
+static void start_stream(const char *name, const char *url, media_type_t type, int idx,
+                         media_ctx_t ctx)
 {
+    if (ctx == CTX_PRESET) {
+        s_last_preset = idx;
+    } else {
+        s_last_tv = idx;
+    }
     if (type == MEDIA_UDP) {
         set_error("组播源暂不支持，请用 udpxy 转 http");
         return;
@@ -1114,6 +1127,7 @@ static void start_stream(const char *name, const char *url, media_type_t type, i
     set_state(RADIO_STATE_CONNECTING, NULL);
     set_station(idx);
     set_name(name);
+    set_ctx(ctx);
     set_info(0, 0, 0);
     set_buffer(0);
     set_buffering(false);
@@ -1177,7 +1191,7 @@ static void net_task(void *arg)
 
         switch (m.cmd) {
         case CMD_PLAY:
-            if (!ctx_get(station, &name, &url, &type)) {
+            if (!ctx_get(m.ctx, station, &name, &url, &type)) {
                 break;
             }
             /* Ghost taps can re-select the playing station; restarting the
@@ -1198,7 +1212,7 @@ static void net_task(void *arg)
                 break;
             }
             s_stop_req = false;
-            start_stream(name, url, type, station);
+            start_stream(name, url, type, station, m.ctx);
             break;
         case CMD_PAUSE:
             s_stop_req = true;
@@ -1214,14 +1228,14 @@ static void net_task(void *arg)
         case CMD_PREV: {
             radio_status_t st;
             radio_get_status(&st);
-            int cnt = ctx_count();
+            int cnt = ctx_count(m.ctx);
             if (cnt <= 0) {
-                set_error(s_ctx == CTX_TV ? "频道列表未加载" : "没有可用电台");
+                set_error(m.ctx == CTX_TV ? "频道列表未加载" : "没有可用电台");
                 break;
             }
             int delta = (m.cmd == CMD_NEXT) ? 1 : -1;
             int next = (st.station + delta + cnt) % cnt;
-            if (!ctx_get(next, &name, &url, &type)) {
+            if (!ctx_get(m.ctx, next, &name, &url, &type)) {
                 break;
             }
             set_station(next);
@@ -1230,7 +1244,7 @@ static void net_task(void *arg)
                 break;
             }
             s_stop_req = false;
-            start_stream(name, url, type, next);
+            start_stream(name, url, type, next, m.ctx);
             break;
         }
         default:
@@ -1363,6 +1377,7 @@ void radio_init(void)
 
     memset(&s_status, 0, sizeof(s_status));
     s_status.state = RADIO_STATE_IDLE;
+    s_status.ctx = CTX_PRESET;
     s_status.station = 0;
     s_status.buffer_pct = 0;
     s_status.level = 0;
@@ -1439,33 +1454,41 @@ void radio_play_tv(int idx)
     xQueueSend(s_queue, &m, 0);
 }
 
-void radio_toggle_pause(void)
+void radio_pause_toggle(media_ctx_t ctx)
 {
     radio_status_t st;
     radio_get_status(&st);
-    if (st.state == RADIO_STATE_PLAYING ||
-        st.state == RADIO_STATE_BUFFERING ||
-        st.state == RADIO_STATE_CONNECTING) {
-        radio_msg_t m = {.cmd = CMD_PAUSE, .arg = 0};
+    if (s_ctx == ctx &&
+        (st.state == RADIO_STATE_PLAYING ||
+         st.state == RADIO_STATE_BUFFERING ||
+         st.state == RADIO_STATE_CONNECTING)) {
+        radio_msg_t m = {.cmd = CMD_PAUSE, .ctx = ctx, .arg = 0};
         if (s_queue) xQueueSend(s_queue, &m, 0);
-    } else {
-        radio_msg_t m = {.cmd = CMD_PLAY, .arg = st.station};
-        if (s_queue) xQueueSend(s_queue, &m, 0);
+        return;
     }
+    /* This page's source is not the active one: start its last selection. */
+    if (ctx == CTX_TV && media_list_state() != MEDIA_LIST_OK) {
+        ESP_LOGW(TAG, "tv playlist not loaded yet");
+        return;
+    }
+    s_ctx = ctx;
+    int last = (ctx == CTX_TV) ? s_last_tv : s_last_preset;
+    radio_msg_t m = {.cmd = CMD_PLAY, .ctx = ctx, .arg = last};
+    if (s_queue) xQueueSend(s_queue, &m, 0);
 }
 
-void radio_next(void)
+void radio_next(media_ctx_t ctx)
 {
     if (s_queue) {
-        radio_msg_t m = {.cmd = CMD_NEXT, .arg = 0};
+        radio_msg_t m = {.cmd = CMD_NEXT, .ctx = ctx, .arg = 0};
         xQueueSend(s_queue, &m, 0);
     }
 }
 
-void radio_prev(void)
+void radio_prev(media_ctx_t ctx)
 {
     if (s_queue) {
-        radio_msg_t m = {.cmd = CMD_PREV, .arg = 0};
+        radio_msg_t m = {.cmd = CMD_PREV, .ctx = ctx, .arg = 0};
         xQueueSend(s_queue, &m, 0);
     }
 }

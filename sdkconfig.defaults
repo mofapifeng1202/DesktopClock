@@ -85,10 +85,9 @@ CONFIG_AUDIO_SIMPLE_DEC_M4A_SUPPORT=n
 CONFIG_AUDIO_SIMPLE_DEC_OGG_SUPPORT=n
 # AAC + MP3 decoders and the TS container stay enabled (defaults y).
 
-# Big built-in CJK font (~154 KB bitmaps) used as the fallback for TV channel
-# names coming from the runtime IPTV playlist -- those glyphs are not in the
-# generated subsets.
-CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_16_CJK=y
+# TV channel names from the IPTV playlist are covered by the generated
+# font_radio_* subsets (tools/gen_radio_font.sh merges the live playlist's
+# characters); the LVGL built-in CJK font is not needed.
 
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8

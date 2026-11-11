@@ -127,7 +127,15 @@ static media_type_t classify_url(const char *url)
     return MEDIA_TS;
 }
 
-/* Channel grouping: 央视 first, then provincial (卫视), then the rest. */
+/* Channel grouping: 央视 first, then provincial (卫视/省市台), then the rest. */
+static const char *const province_kw[] = {
+    "北京", "上海", "广东", "福建", "河北", "山东", "天津", "辽宁", "江西",
+    "河南", "陕西", "湖北", "吉林", "青海", "宁夏", "重庆", "三沙", "黑龙江",
+    "湖南", "浙江", "安徽", "江苏", "四川", "深圳", "广州", "海南", "海峡",
+    "大湾区", "兵团", "新疆", "西藏", "甘肃", "广西", "山西", "云南", "贵州",
+    "内蒙古", "福州", "廊坊", "五星", "南方",
+};
+
 static int group_of(const char *name)
 {
     if (strncasecmp(name, "CCTV", 4) == 0 || strncasecmp(name, "CGTN", 4) == 0 ||
@@ -137,7 +145,31 @@ static int group_of(const char *name)
     if (strstr(name, "卫视") != NULL) {
         return 1;
     }
+    for (size_t i = 0; i < sizeof(province_kw) / sizeof(province_kw[0]); i++) {
+        if (strstr(name, province_kw[i]) != NULL) {
+            return 1;
+        }
+    }
     return 2;
+}
+
+/* Numeric channel number for CCTV/CGTN names (CCTV5+ -> 5), else -1. */
+static int ch_num(const char *name)
+{
+    if (strncasecmp(name, "CCTV", 4) == 0) {
+        const char *p = name + 4;
+        while (*p && (*p < '0' || *p > '9')) {
+            p++;
+        }
+        if (*p >= '0' && *p <= '9') {
+            return atoi(p);
+        }
+        return -1;
+    }
+    if (strncasecmp(name, "CGTN", 4) == 0) {
+        return 100;                       /* after all CCTV numbers */
+    }
+    return -1;
 }
 
 static int entry_cmp(const void *a, const void *b)
@@ -146,6 +178,11 @@ static int entry_cmp(const void *a, const void *b)
     const media_entry_t *eb = b;
     if (ea->group != eb->group) {
         return ea->group - eb->group;
+    }
+    int na = ch_num(ea->name);
+    int nb = ch_num(eb->name);
+    if (na >= 0 && nb >= 0 && na != nb) {
+        return na - nb;                   /* CCTV1, CCTV2, ... CCTV13 */
     }
     return strcmp(ea->name, eb->name);
 }
@@ -342,6 +379,12 @@ static void load_task(void *arg)
         if (media_list_type(i) == MEDIA_UDP) n_udp++;
     }
     ESP_LOGI(TAG, "playlist ready: %d channels (%d udp multicast)", count, n_udp);
+    char head[176];
+    int off = 0;
+    for (int i = 0; i < count && i < 10; i++) {
+        off += snprintf(head + off, sizeof(head) - off, "%s | ", entries[i].name);
+    }
+    ESP_LOGI(TAG, "sorted head: %s", head);
     free(url);
     vTaskDelete(NULL);
 }

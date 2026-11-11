@@ -62,8 +62,7 @@ static int s_page;
 static lv_obj_t *s_page_lbl;
 static uint32_t s_last_stream_id;
 static bool s_vol_sync;
-static radio_state_t s_last_state = (radio_state_t)-1;
-static bool s_last_buffering;
+static char s_last_status_txt[16] = "已停止";
 static int s_last_station = -1;
 static int s_last_page = -1;
 static uint32_t s_last_info_color = 0xffffffff;
@@ -207,19 +206,19 @@ void radio_ui_set_volume(int vol)
 static void play_cb(lv_event_t *e)
 {
     (void)e;
-    radio_toggle_pause();
+    radio_pause_toggle(CTX_PRESET);
 }
 
 static void prev_cb(lv_event_t *e)
 {
     (void)e;
-    radio_prev();
+    radio_prev(CTX_PRESET);
 }
 
 static void next_cb(lv_event_t *e)
 {
     (void)e;
-    radio_next();
+    radio_next(CTX_PRESET);
 }
 
 /* Spectrum bars, drawn directly: 16 columns, height = band value (0..100). */
@@ -303,37 +302,47 @@ static void tick_cb(lv_timer_t *t)
         }
     }
 
+    /* Per-page state: this page only reports its own source. When the other
+     * page is playing, show that instead of a synced play state. */
+    bool page_active = (st.ctx == CTX_PRESET) &&
+                       (st.state == RADIO_STATE_PLAYING ||
+                        st.state == RADIO_STATE_BUFFERING ||
+                        st.state == RADIO_STATE_CONNECTING);
     const char *status = "已停止";
     uint32_t color = C_DIM;
-    switch (st.state) {
-    case RADIO_STATE_CONNECTING:
-        status = "连接中";
-        color = C_AMBER;
-        break;
-    case RADIO_STATE_BUFFERING:
-        status = "缓冲中";
-        color = C_AMBER;
-        break;
-    case RADIO_STATE_PLAYING:
-        status = st.buffering ? "缓冲中" : "播放中";
-        color = st.buffering ? C_AMBER : C_GREEN;
-        break;
-    case RADIO_STATE_PAUSED:
-        status = "已暂停";
-        color = C_DIM;
-        break;
-    case RADIO_STATE_ERROR:
+    if (st.state == RADIO_STATE_ERROR) {
         status = "出错";
         color = C_RED;
-        break;
-    default:
-        break;
+    } else if (page_active) {
+        switch (st.state) {
+        case RADIO_STATE_CONNECTING:
+            status = "连接中";
+            color = C_AMBER;
+            break;
+        case RADIO_STATE_BUFFERING:
+            status = "缓冲中";
+            color = C_AMBER;
+            break;
+        case RADIO_STATE_PLAYING:
+            status = st.buffering ? "缓冲中" : "播放中";
+            color = st.buffering ? C_AMBER : C_GREEN;
+            break;
+        default:
+            status = "播放中";
+            color = C_GREEN;
+            break;
+        }
+    } else if (st.state == RADIO_STATE_PLAYING ||
+               st.state == RADIO_STATE_BUFFERING ||
+               st.state == RADIO_STATE_CONNECTING) {
+        status = (st.ctx == CTX_TV) ? "电视播放中" : "电台播放中";
+    } else if (st.state == RADIO_STATE_PAUSED && st.ctx == CTX_PRESET) {
+        status = "已暂停";
     }
-    bool visual_changed = (st.state != s_last_state) || (st.buffering != s_last_buffering);
+    bool visual_changed = (strcmp(status, s_last_status_txt) != 0);
     if (visual_changed) {
         lv_obj_set_style_text_color(s_status, lv_color_hex(color), 0);
-        s_last_state = st.state;
-        s_last_buffering = st.buffering;
+        strlcpy(s_last_status_txt, status, sizeof(s_last_status_txt));
     }
     set_text(s_status, status);
 
@@ -376,7 +385,7 @@ static void tick_cb(lv_timer_t *t)
     set_text(s_buf_lbl, buf);
     lv_bar_set_value(s_buf_bar, st.buffer_pct, LV_ANIM_OFF);
 
-    set_text(s_play_lbl, active ? "暂停" : "播放");
+    set_text(s_play_lbl, page_active ? "暂停" : "播放");
 
     if (st.station != s_last_station || s_page != s_last_page) {
         for (int k = 0; k < BTNS_PER_PAGE; k++) {
