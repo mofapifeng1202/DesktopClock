@@ -81,9 +81,10 @@ static const char *TAG = "st77922";
 
 #define LCD_H_RES       480            /* logical / rotated resolution */
 #define LCD_V_RES       320
-/* One 32-line buffer (15 KB) instead of two 16-line ones: fewer, bigger strips
- * mean fewer per-area passes over the object tree, which is what costs time
- * here (measured: 10 strips 36 ms vs 20 strips 46 ms for a full repaint). */
+/* One 28-line buffer instead of two 16-line ones: taller strips mean fewer
+ * per-area passes over the object tree, which is what costs the time here
+ * (measured full repaint: 20 strips 46 ms, 12 strips 40 ms, 10 strips 36 ms).
+ * 24 lines = more headroom, 32 lines = fastest but only ~32 KB internal free. */
 #define LCD_BUF_LINES   28
 #define LCD_DOUBLE_BUF  0
 #ifndef LCD_QSPI_PCLK_HZ
