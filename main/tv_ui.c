@@ -16,6 +16,7 @@
  * Video is not decodable on ESP32-S3 (HEVC), so this page is audio-only.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_lvgl_port.h"
@@ -67,6 +68,22 @@ static lv_obj_t *s_drawer_list;
 static lv_obj_t *s_drawer_title;
 static bool s_drawer_open;
 
+/* The channel list is virtualised: a flat item array (group headers plus
+ * channels) and a handful of recycled row widgets, so opening the drawer for
+ * 86 channels costs ~4 KB of heap instead of ~25 KB. */
+#define DRAWER_ROW_H   40
+#define DRAWER_SLOTS   8          /* visible rows + overscan */
+#define ITEM_HEADER    0x8000     /* item is a header, low bits = group id */
+
+static uint16_t *s_items;
+static int s_item_count;
+static lv_obj_t *s_sizer;         /* invisible spacer that sets the scroll range */
+static lv_obj_t *s_slot_row[DRAWER_SLOTS];
+static lv_obj_t *s_slot_lbl[DRAWER_SLOTS];
+static int s_slot_chan[DRAWER_SLOTS];
+
+static void drawer_update_rows(void);
+
 static bool s_vol_sync;
 static char s_last_status_txt[16] = "已停止";
 static int s_last_station = -1;
@@ -76,6 +93,7 @@ static uint32_t s_last_stream_id;
 
 static const char *lstate_text(void);
 static void drawer_close(void);
+static void drawer_open(void);
 
 static void set_text(lv_obj_t *lbl, const char *txt)
 {
@@ -127,6 +145,17 @@ static void vol_cb(lv_event_t *e)
     int v = (int)lv_slider_get_value(lv_event_get_target(e));
     update_vol_label(v);
     ui_sync_volume(v);
+}
+
+/* Diagnostics: open/close the channel drawer from outside the LVGL task
+ * (the web page uses it to measure the drawer's heap cost). */
+void tv_ui_debug_drawer(bool open)
+{
+    if (open) {
+        drawer_open();
+    } else {
+        drawer_close();
+    }
 }
 
 void tv_ui_set_volume(int vol)
@@ -252,20 +281,26 @@ static const char *group_name(int g)
 
 static void channel_row_cb(lv_event_t *e)
 {
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx >= 0 && idx < media_list_count()) {
-        radio_play_tv(idx);
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    if (slot >= 0 && slot < DRAWER_SLOTS) {
+        int idx = s_slot_chan[slot];
+        if (idx >= 0 && idx < media_list_count()) {
+            radio_play_tv(idx);
+        }
     }
     drawer_close();
+}
+
+static void list_scroll_cb(lv_event_t *e)
+{
+    (void)e;
+    drawer_update_rows();
 }
 
 static void drawer_close_anim_ready(lv_anim_t *a)
 {
     lv_obj_t *drawer = (lv_obj_t *)a->var;
     lv_obj_add_flag(drawer, LV_OBJ_FLAG_HIDDEN);
-    if (s_drawer_list) {
-        lv_obj_clean(s_drawer_list);          /* free the channel rows */
-    }
 }
 
 static void drawer_slide(lv_obj_t *drawer, int32_t to, bool hide_at_end)
@@ -283,6 +318,92 @@ static void drawer_slide(lv_obj_t *drawer, int32_t to, bool hide_at_end)
     lv_anim_start(&a);
 }
 
+static void drawer_update_rows(void)
+{
+    if (s_drawer_list == NULL || s_items == NULL) {
+        return;
+    }
+    int32_t scroll_y = lv_obj_get_scroll_y(s_drawer_list);
+    if (scroll_y < 0) {
+        scroll_y = 0;
+    }
+    int first = (int)(scroll_y / DRAWER_ROW_H) - 1;   /* one row of overscan */
+    if (first < 0) {
+        first = 0;
+    }
+
+    radio_status_t st;
+    radio_get_status(&st);
+    bool playing = (st.state == RADIO_STATE_PLAYING ||
+                    st.state == RADIO_STATE_BUFFERING ||
+                    st.state == RADIO_STATE_PAUSED ||
+                    st.state == RADIO_STATE_CONNECTING);
+
+    for (int i = 0; i < DRAWER_SLOTS; i++) {
+        int idx = first + i;
+        lv_obj_t *row = s_slot_row[i];
+        lv_obj_t *lbl = s_slot_lbl[i];
+        if (idx >= s_item_count) {
+            lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+            s_slot_chan[i] = -1;
+            continue;
+        }
+        uint16_t item = s_items[idx];
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(row, 4, idx * DRAWER_ROW_H);
+
+        if (item & ITEM_HEADER) {
+            s_slot_chan[i] = -1;
+            lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(C_AMBER), 0);
+            lv_label_set_text(lbl, group_name(item & 0x7fff));
+            lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 8, 0);
+            continue;
+        }
+
+        int ch = item;
+        s_slot_chan[i] = ch;
+        bool sel = playing && ch == st.station;
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(sel ? C_BTN_SEL : C_BTN), 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(C_TEXT), 0);
+        lv_label_set_text(lbl, media_list_name(ch));
+        lv_obj_center(lbl);
+    }
+}
+
+static void drawer_build_items(void)
+{
+    free(s_items);
+    s_items = NULL;
+    s_item_count = 0;
+
+    int count = media_list_count();
+    if (count > 0) {
+        /* worst case: every channel starts a new group */
+        uint16_t *items = malloc(((size_t)count * 2 + 4) * sizeof(uint16_t));
+        if (items != NULL) {
+            int n = 0;
+            int last_group = -1;
+            for (int i = 0; i < count; i++) {
+                int g = media_list_group(i);
+                if (g != last_group) {
+                    items[n++] = (uint16_t)(ITEM_HEADER | (g & 0x7fff));
+                    last_group = g;
+                }
+                items[n++] = (uint16_t)i;
+            }
+            s_items = items;
+            s_item_count = n;
+        }
+    }
+    if (s_sizer != NULL) {
+        lv_obj_set_height(s_sizer, s_item_count ? s_item_count * DRAWER_ROW_H : 1);
+    }
+}
+
 static void drawer_open(void)
 {
     if (s_drawer_open) {
@@ -294,58 +415,45 @@ static void drawer_open(void)
     lv_obj_move_foreground(s_scrim);
     lv_obj_move_foreground(s_drawer);
 
-    /* Build rows on open so the selection highlight is current, and free
-     * them on close (86 rows would hold ~25 KB of the internal heap). */
-    lv_obj_clean(s_drawer_list);
     int count = media_list_count();
     char buf[48];
     snprintf(buf, sizeof(buf), "频道列表 · %d 个", count);
     set_text(s_drawer_title, buf);
 
+    drawer_build_items();
+
+    /* Scroll to the playing channel, then fill the visible rows. */
     radio_status_t st;
     radio_get_status(&st);
-    int last_group = -1;
-    int y = 0;
-    if (count == 0) {
-        make_label(s_drawer_list, F14, C_DIM, 8, 8, lstate_text());
-        y = 34;
-    }
-    for (int i = 0; i < count; i++) {
-        int g = media_list_group(i);
-        if (g != last_group) {
-            lv_obj_t *h = lv_label_create(s_drawer_list);
-            lv_obj_set_style_text_font(h, F14, 0);
-            lv_obj_set_style_text_color(h, lv_color_hex(C_AMBER), 0);
-            lv_label_set_text(h, group_name(g));
-            lv_obj_set_pos(h, 8, y + 2);
-            y += 26;
-            last_group = g;
+    int32_t sel_item = 0;
+    for (int i = 0; i < s_item_count; i++) {
+        if (!(s_items[i] & ITEM_HEADER) && (int)s_items[i] == st.station) {
+            sel_item = i;
+            break;
         }
-        lv_obj_t *row = lv_button_create(s_drawer_list);
-        lv_obj_set_pos(row, 4, y);
-        lv_obj_set_size(row, DRAWER_W - 16, 36);
-        bool sel = (i == st.station &&
-                    (st.state == RADIO_STATE_PLAYING ||
-                     st.state == RADIO_STATE_BUFFERING ||
-                     st.state == RADIO_STATE_PAUSED ||
-                     st.state == RADIO_STATE_CONNECTING));
-        lv_obj_set_style_bg_color(row, lv_color_hex(sel ? C_BTN_SEL : C_BTN), 0);
-        lv_obj_set_style_bg_color(row, lv_color_hex(C_BTN_SEL), LV_STATE_PRESSED);
-        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(row, 8, 0);
-        lv_obj_set_style_shadow_width(row, 0, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_add_event_cb(row, channel_row_cb, LV_EVENT_CLICKED,
-                            (void *)(intptr_t)i);
-
-        lv_obj_t *lbl = lv_label_create(row);
-        lv_obj_set_style_text_font(lbl, F14, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(C_TEXT), 0);
-        lv_label_set_text(lbl, media_list_name(i));
-        lv_obj_center(lbl);
-        y += 40;
     }
-    lv_obj_scroll_to(s_drawer_list, 0, 0, LV_ANIM_OFF);
+    int32_t y = sel_item * DRAWER_ROW_H - 2 * DRAWER_ROW_H;
+    if (y < 0) {
+        y = 0;
+    }
+    lv_obj_scroll_to(s_drawer_list, 0, y, LV_ANIM_OFF);
+
+    if (s_item_count == 0) {
+        /* loading / failed state in the first slot */
+        for (int i = 0; i < DRAWER_SLOTS; i++) {
+            lv_obj_add_flag(s_slot_row[i], LV_OBJ_FLAG_HIDDEN);
+            s_slot_chan[i] = -1;
+        }
+        lv_obj_remove_flag(s_slot_row[0], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(s_slot_row[0], 4, 0);
+        lv_obj_set_style_bg_opa(s_slot_row[0], LV_OPA_TRANSP, 0);
+        lv_obj_remove_flag(s_slot_row[0], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_text_color(s_slot_lbl[0], lv_color_hex(C_DIM), 0);
+        lv_label_set_text(s_slot_lbl[0], lstate_text());
+        lv_obj_align(s_slot_lbl[0], LV_ALIGN_LEFT_MID, 8, 0);
+    } else {
+        drawer_update_rows();
+    }
 
     drawer_slide(s_drawer, 0, false);
 }
@@ -552,8 +660,10 @@ void tv_ui_build(lv_obj_t *parent)
     lv_obj_remove_style_all(s_scrim);
     lv_obj_set_pos(s_scrim, 0, 0);
     lv_obj_set_size(s_scrim, 480, 284);
-    lv_obj_set_style_bg_color(s_scrim, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(s_scrim, LV_OPA_60, 0);
+    /* Opaque: a semi-transparent overlay makes LVGL allocate a 24 KB layer
+     * buffer for the whole area while the drawer is open. */
+    lv_obj_set_style_bg_color(s_scrim, lv_color_hex(0x081426), 0);
+    lv_obj_set_style_bg_opa(s_scrim, LV_OPA_COVER, 0);
     lv_obj_add_flag(s_scrim, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_scrim, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(s_scrim, scrim_cb, LV_EVENT_CLICKED, NULL);
@@ -576,7 +686,41 @@ void tv_ui_build(lv_obj_t *parent)
     lv_obj_set_size(s_drawer_list, DRAWER_W - 8, 284 - 44);
     lv_obj_add_flag(s_drawer_list, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_drawer_list, LV_DIR_VER);
-    /* rows are built in drawer_open() and freed on close */
+    lv_obj_set_style_bg_opa(s_drawer_list, LV_OPA_TRANSP, 0);
+    lv_obj_add_event_cb(s_drawer_list, list_scroll_cb, LV_EVENT_SCROLL, NULL);
+
+    /* Invisible spacer that gives the scroll range of the whole list. */
+    s_sizer = lv_obj_create(s_drawer_list);
+    lv_obj_remove_style_all(s_sizer);
+    lv_obj_set_pos(s_sizer, 0, 0);
+    lv_obj_set_size(s_sizer, 1, 1);
+    lv_obj_remove_flag(s_sizer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_sizer, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Recycled rows; content and styling are set in drawer_update_rows(). */
+    for (int i = 0; i < DRAWER_SLOTS; i++) {
+        lv_obj_t *row = lv_button_create(s_drawer_list);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, DRAWER_W - 16, DRAWER_ROW_H - 4);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(C_BTN), 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(C_BTN_SEL), LV_STATE_PRESSED);
+        lv_obj_set_style_radius(row, 8, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_event_cb(row, channel_row_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_obj_set_style_text_font(lbl, F14, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(C_TEXT), 0);
+        lv_label_set_text(lbl, "");
+
+        s_slot_row[i] = row;
+        s_slot_lbl[i] = lbl;
+        s_slot_chan[i] = -1;
+    }
 
     lv_timer_create(tick_cb, 200, NULL);
     lv_timer_create(spectrum_tick_cb, 33, NULL);

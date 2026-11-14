@@ -161,30 +161,50 @@ tileview 第 4 页是 IPTV：开机后自动从频道表地址拉取 m3u 并解�
 
 ## 显示与流畅度（实测数据）
 
-屏幕是 QSPI 40MHz、面板原生竖屏，横屏是**软件旋转**做的，所以每一帧都要多走一遍
-"旋转 + RGB565 字节交换"。整屏 480×320 刷一次 = 153,600 像素，实测分解（`/api/uibench`）：
+屏幕是 QSPI 面板、原生竖屏，横屏靠**软件旋转**实现，所以每一帧都要多做一遍
+"旋转 + RGB565 字节交换"。整屏 480×320 刷一次 = 153,600 像素。
+
+用 `/api/uibench`（强制整屏重绘一次并计时）实测，同一块板子：
+
+| 显示缓冲配置 | 整屏重绘 | 内部 RAM（空闲/最低/最大连续块） |
+|---|---|---|
+| 2 × 16 行双缓冲（最初） | 46 ms（≈22 fps） | 53 KB / 37 KB / 25 KB |
+| 1 × 24 行 | 43 ms | 46 KB / 23 KB / 22 KB |
+| **1 × 28 行（当前）** | **40 ms（≈25 fps）** | 38 KB / 19 KB / 13 KB |
+| 1 × 32 行 | 36 ms（≈28 fps） | 32 KB / 9 KB / 7 KB |
+
+结论：这里的时间主要不是被 QSPI 带宽卡住，而是**每次刷新的固定开销**——
+条带越矮，LVGL 每画一条都要重新遍历一遍对象树、面板也要多设几次窗口。
+所以"少而高"的条带比"多而矮"的双缓冲更快，把 16 行双缓冲换成 28 行单缓冲就快了 13%。
+想更快就把 `main/main.c` 的 `LCD_BUF_LINES` 调到 32（再快 10%，代价是内部 RAM 只剩 ~32 KB）。
+
+单帧的时间构成（28 行配置）：
 
 | 项目 | 耗时 |
 |---|---|
-| 一帧完整重绘（时钟页，QSPI 80MHz） | ~46 ms（≈21 fps） |
-| 其中：软件旋转 + 字节交换 + 提交 DMA | ~11 ms |
-| 其中：等 QSPI 把 307 KB 送完（80MHz） | ~8 ms |
-| 其中：LVGL 软件渲染 | ~27 ms |
-| 只有背景、没有任何控件的整屏重绘 | ~28 ms |
-
-QSPI 时钟常量在 `main/main.c` 的 `LCD_QSPI_PCLK_HZ`（默认 80MHz，改 40MHz 可回退到
-模组标称值；只有纯色/局部刷新这种"总线瓶颈"的场景会受影响，整页重绘时间基本不变）。
+| LVGL 软件渲染 | ~24 ms |
+| 软件旋转 + 字节交换 + 提交 DMA | ~9 ms |
+| 等 QSPI 把 307 KB 送完（`LCD_QSPI_PCLK_HZ`，默认 80 MHz） | ~8 ms（与上面部分重叠） |
+| 只画背景、没有任何控件的整屏重绘 | 24 ms |
 
 诊断接口（都返回 JSON）：
 
 ```bash
-curl http://<ip>/api/status        # uiframes/uiframeus/uiflushus/uikpx：近 1 秒的帧统计
-curl http://<ip>/api/uibench       # 强制整屏重绘一次，返回 ms/areas/flushms
-curl "http://<ip>/api/uibench?plain=1"   # 隐藏页面内容，只画背景（测管线地板）
-curl "http://<ip>/api/uibench?rot=0"     # 临时关掉软件旋转再测（对比旋转开销）
+curl http://<ip>/api/status      # uiframes/uiframeus/uiflushus/uikpx：近 1 秒的帧统计
+curl http://<ip>/api/uibench     # 强制整屏重绘一次，返回 ms/areas/flushms
+curl "http://<ip>/api/uibench?plain=1"    # 隐藏页面内容，只画背景（管线地板）
+curl "http://<ip>/api/uibench?rot=0"      # 临时关掉软件旋转再测（对比旋转开销）
+curl "http://<ip>/api/uibench?drawer=1"   # 开一次频道抽屉，返回它占了多少 KB 堆
 ```
 
 串口每 10 秒打印一行 `ui: N fps-ish, frame X us, flush Y us xZ, N kpx/s`。
+
+其它跟流畅度/内存有关的细节：
+
+- **频道抽屉是虚拟滚动**：只建 8 行控件并复用，滚到哪画哪。原来 86 个频道要建 86 个
+  按钮 + 86 个标签 ≈ 25 KB 内部 RAM，现在 ~0.6 KB（86 → 87 个频道也不会涨）。
+- 抽屉的遮罩层是不透明的：半透明遮罩会让 LVGL 为整个区域申请 24 KB 的临时图层缓冲。
+- 页背景都是透明的，只有屏幕本身画一次底色，避免每页重复填一遍同色矩形。
 
 ## 环境搭建踩坑记录（macOS x86_64 + 系统 Python 3.9）
 

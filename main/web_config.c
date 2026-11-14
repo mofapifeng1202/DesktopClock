@@ -22,6 +22,7 @@
 
 #include "backlight.h"
 #include "clock_ui.h"
+#include "tv_ui.h"
 #include "esp_lvgl_port.h"
 #include "ui_perf.h"
 #include "main.h"
@@ -276,6 +277,32 @@ static esp_err_t h_factory(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ?drawer=1 on /api/uibench opens the TV channel drawer so its heap cost can
+ * be measured (it used to hold ~25 KB of internal RAM for 86 rows). */
+static void drawer_probe(httpd_req_t *req, cJSON *r)
+{
+    char qs[32];
+    char val[8];
+    if (httpd_req_get_url_query_str(req, qs, sizeof(qs)) != ESP_OK ||
+        httpd_query_key_value(qs, "drawer", val, sizeof(val)) != ESP_OK ||
+        atoi(val) == 0) {
+        return;
+    }
+    uint32_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    if (lvgl_port_lock(1000)) {
+        tv_ui_debug_drawer(true);
+        lvgl_port_unlock();
+    }
+    vTaskDelay(pdMS_TO_TICKS(400));
+    uint32_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    if (lvgl_port_lock(1000)) {
+        tv_ui_debug_drawer(false);
+        lvgl_port_unlock();
+    }
+    cJSON_AddNumberToObject(r, "drawer_kb", (double)(before - after) / 1024.0);
+    cJSON_AddNumberToObject(r, "drawer_min", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+}
+
 /* Force a full-screen repaint and time it: render + rotate/swap + SPI DMA for
  * 480x320 pixels. This is the number to watch when tuning the display path. */
 static esp_err_t h_uibench(httpd_req_t *req)
@@ -343,6 +370,7 @@ static esp_err_t h_uibench(httpd_req_t *req)
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "ms", (double)dt_us / 1000.0);
     cJSON_AddNumberToObject(r, "px", got);
+    drawer_probe(req, r);
     uint32_t ar1 = 0, fu1 = 0;
     ui_perf_raw(&ar1, &fu1, NULL);
     cJSON_AddNumberToObject(r, "areas", (double)(ar1 - ar0));
