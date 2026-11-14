@@ -30,6 +30,7 @@
 #include "freertos/task.h"
 
 #include "media_list.h"
+#include "settings.h"
 #include "wifi_app.h"
 
 static const char *TAG = "media_list";
@@ -41,7 +42,7 @@ static const char *TAG = "media_list";
 #endif
 
 #ifndef TV_LIST_URL
-#define TV_LIST_URL "http://192.168.1.98:1905/interface.m3u?relay=2"
+#define TV_LIST_URL "http://iptv.example.com:1905/interface.m3u?relay=2"
 #endif
 
 #define LIST_MAX_ENTRIES 256
@@ -392,7 +393,7 @@ static void load_task(void *arg)
 void media_list_start_load(const char *url)
 {
     if (url == NULL || url[0] == '\0') {
-        url = TV_LIST_URL;
+        url = settings_get()->tv_url;
     }
     snprintf(s_source, sizeof(s_source), "%s", url);
     s_state = MEDIA_LIST_LOADING;

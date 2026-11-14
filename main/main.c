@@ -52,12 +52,15 @@
 #include "nvs_flash.h"
 #include "st77922_vendor_init.h"
 
+#include "backlight.h"
 #include "clock_ui.h"
 #include "main.h"
 #include "media_list.h"
 #include "radio.h"
-#include "wifi_app.h"
+#include "settings.h"
 #include "weather.h"
+#include "web_config.h"
+#include "wifi_app.h"
 
 static const char *TAG = "st77922";
 
@@ -522,9 +525,13 @@ static void boot_btn_task(void *arg)
         if (level != last) {
             last = level;
             if (level == 0) {
-                s_bl_on = !s_bl_on;
-                gpio_set_level(PIN_LCD_BL, s_bl_on ? 1 : 0);
-                ESP_LOGI(TAG, "backlight %s", s_bl_on ? "on" : "off");
+                if (backlight_is_on()) {
+                    backlight_off();
+                    ESP_LOGI(TAG, "backlight off");
+                } else {
+                    backlight_on();
+                    ESP_LOGI(TAG, "backlight on");
+                }
             }
         }
         /* Touch calibration heartbeat: never touches the controller itself (reading
@@ -741,6 +748,15 @@ static void tp_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         return;
     }
 
+    /* Wake the screen on touch; swallow the tap that woke it so the user
+     * does not accidentally press whatever was under the finger. */
+    bool was_on = backlight_is_on();
+    backlight_activity();
+    if (!was_on) {
+        have_last = false;
+        return;
+    }
+
     int best = 0;
     for (int i = 1; i < cnt; i++) {
         if (strength[i] > strength[best]) {
@@ -850,13 +866,10 @@ void app_main(void)
     esp_reset_reason_t rr = esp_reset_reason();
     ESP_LOGI(TAG, "reset reason: %d (%s)", (int)rr, reset_reason_name(rr));
 
-    /* Backlight off until the panel is initialized */
-    gpio_config_t bl_cfg = {
-        .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << PIN_LCD_BL,
-    };
-    ESP_ERROR_CHECK(gpio_config(&bl_cfg));
-    gpio_set_level(PIN_LCD_BL, 0);
+    /* Settings + backlight PWM first: everything else reads from them. */
+    nvs_init();
+    settings_init();
+    backlight_init();          /* dark until the panel is initialised */
 
     ESP_LOGI(TAG, "Initialize QSPI bus");
     const spi_bus_config_t buscfg = ST77922_PANEL_BUS_QSPI_CONFIG(
@@ -891,7 +904,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, true));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
-    gpio_set_level(PIN_LCD_BL, 1);
+    backlight_on();            /* apply the configured brightness */
 
     ESP_LOGI(TAG, "Initialize LVGL port");
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
@@ -944,7 +957,6 @@ void app_main(void)
         s_tp = tp;
     }
 
-    nvs_init();
     radio_init();
     battery_init();
     rgb_init();
@@ -968,6 +980,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Initialize ES8311 codec (speaker + volume)");
     if (audio_init() == ESP_OK) {
+        audio_set_vol(settings_get()->volume);
         speaker_chime(250);
     } else {
         ESP_LOGE(TAG, "audio init failed");
@@ -979,6 +992,8 @@ void app_main(void)
     wifi_app_start();
     weather_start();
     radio_start();
+    web_config_start();
+    backlight_start_sleep_task();
     xTaskCreate(ui_monitor_task, "ui_mon", 3072, NULL, 1, NULL);
 #if RADIO_SELFTEST
     xTaskCreate(radio_selftest_task, "radio_test", 4096, NULL, 3, NULL);

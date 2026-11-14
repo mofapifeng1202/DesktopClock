@@ -22,6 +22,7 @@
 #include "clock_ui.h"
 #include "main.h"
 #include "radio.h"
+#include "ui_sync.h"
 #include "radio_ui.h"
 #include "spectrum.h"
 
@@ -186,9 +187,8 @@ static void vol_cb(lv_event_t *e)
         return;
     }
     int v = (int)lv_slider_get_value(lv_event_get_target(e));
-    audio_set_vol(v);
     update_vol_label(v);
-    clock_ui_set_volume(v);
+    ui_sync_volume(v);
 }
 
 void radio_ui_set_volume(int vol)

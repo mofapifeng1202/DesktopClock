@@ -24,6 +24,8 @@
 #include "clock_ui.h"
 #include "main.h"
 #include "media_list.h"
+#include "settings.h"
+#include "ui_sync.h"
 #include "radio.h"
 #include "spectrum.h"
 #include "tv_ui.h"
@@ -123,9 +125,20 @@ static void vol_cb(lv_event_t *e)
         return;
     }
     int v = (int)lv_slider_get_value(lv_event_get_target(e));
-    audio_set_vol(v);
     update_vol_label(v);
-    clock_ui_set_volume(v);
+    ui_sync_volume(v);
+}
+
+void tv_ui_set_volume(int vol)
+{
+    if (vol < 0) vol = 0;
+    if (vol > 100) vol = 100;
+    s_vol_sync = true;
+    if (s_vol) {
+        lv_slider_set_value(s_vol, vol, LV_ANIM_OFF);
+    }
+    update_vol_label(vol);
+    s_vol_sync = false;
 }
 
 static void play_cb(lv_event_t *e)

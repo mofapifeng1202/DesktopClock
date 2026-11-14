@@ -27,9 +27,14 @@ ESP-IDF 5.4.1 + LVGL 9 + esp_lvgl_port。
 - 天气页：重庆（写死 29.56N/106.55E）当前温度/天气/湿度/风速 + 3 天预报，Open-Meteo 免 key，30 分钟刷新
 - 收音机页：24 个 MP3 网络电台（每页 8 个、头部 < > 翻页），播放/暂停、上一台/下一台、实时频谱与缓冲显示
 - 电视页：接入内网 IPTV（m3u 运行时解析，86 个频道），只出声音不出画面（ESP32 无法解 HEVC）
+- 设置页（第 5 页）：音量滑块、亮度滑块、自动熄屏时间、手机配网、重启、恢复出厂、Wi-Fi/网页地址
+- **网页配置**：浏览器打开设备 IP 即可配置 Wi-Fi / 音量 / 亮度 / 熄屏 / 频道表地址 / 重启 / 出厂；
+  没配网时自动开热点 `DesktopClock-Setup`，手机连上去打开 `http://192.168.4.1` 配网
 - 顶部状态栏：电池电压 + 百分比（ADC1_CH7，1:2 分压）、Wi-Fi 信号、对时状态
-- 左右滑动切换四页；BOOT 键切背光；RGB LED 指示 Wi-Fi 状态
-- ES8311 音频（I2S），开机提示音 + 全局音量控制（时钟页/收音机页滑块同步）
+- 左右滑动切换五页；BOOT 键切背光（点屏即可唤醒）；RGB LED 指示 Wi-Fi 状态
+- 背光改成 LEDC PWM（GPIO41，5 kHz/10 bit），亮度 5%~100% 可调；默认 **5 分钟无操作自动熄屏**，
+  熄屏只是背光关掉，收音机/电视的**声音继续播**
+- ES8311 音频（I2S），开机提示音 + 全局音量控制（时钟页/收音机页/电视页/设置页滑块同步）
 
 引脚映射见 `main/main.c` 头部注释。
 
@@ -51,12 +56,16 @@ idf.py build
 idf.py -p /dev/cu.usbmodem14101 flash monitor
 ```
 
-首次编译前先配置 Wi-Fi：
+首次编译前可以先填好 Wi-Fi（也可以跳过，开机后用手机连 `DesktopClock-Setup` 热点，
+打开 `http://192.168.4.1` 配网）：
 
 ```bash
 cp main/wifi_app_secret.h.example main/wifi_app_secret.h
 # 然后填入你的 2.4GHz Wi-Fi 名称/密码（该文件不入库）
 ```
+
+频道表地址同理：`cp main/tv_config.h.example main/tv_config.h` 后填入内网 IPTV 中继地址，
+或开机后在网页里改（网页里改的值存在 NVS，优先于编译期默认值）。
 
 ## 网络收音机
 
@@ -65,7 +74,9 @@ cp main/wifi_app_secret.h.example main/wifi_app_secret.h
 - 24 个预置台在 `main/radio_stations.h`。只支持直接返回 `audio/mpeg` 的 **MP3 流**；
   HLS（`.m3u8`）和 AAC 不能播放。UI 每页 8 个、用标题栏的 `<` / `>` 翻页，
   列表长度不限（每页 8 个）。改表后重新编译；新台名/新分类出现新汉字时，
-  跑一次 `tools/gen_radio_font.sh` 重新生成收音机字体。
+  跑一次 `tools/gen_radio_font.sh` 重新生成收音机字体（脚本会扫描
+  `radio.c` / `radio_ui.c` / `radio_stations.h` / `tv_ui.c` / `media_list.c` /
+  `settings_ui.c` / `web_config.c`，改这几处的界面文案同样要跑一次）。
 - 播放/暂停、上一台/下一台、缓冲百分比、输出电平；音量和时钟页滑块双向同步。
 - 频谱：播放任务对每帧解码出的 PCM 做 256 点 FFT（约 0.3 ms/帧，PSRAM 存表），
   映射成 16 个对数频段；UI 用独立的 ~30fps 定时器采样自绘（与 200ms 状态刷新解耦，
@@ -90,9 +101,10 @@ cp main/wifi_app_secret.h.example main/wifi_app_secret.h
 
 ## 网络电视（IPTV，音频）
 
-tileview 第 4 页是 IPTV：开机后自动从 `TV_LIST_URL`（在 `main/tv_config.h`
-里配置，复制 `tv_config.h.example` 后填入你的内网 IPTV 中继地址）拉取 m3u
-频道表并解析并按 央视/地方卫视/其他 分组排序。
+tileview 第 4 页是 IPTV：开机后自动从频道表地址拉取 m3u 并解析，按 央视/地方卫视/其他
+分组排序。地址存在 NVS 里，**直接网页改**（设置页 →“电视频道表”）；首次开机的默认值来自
+`main/tv_config.h`（复制 `tv_config.h.example` 后填入你的内网 IPTV 中继地址，该文件已 gitignore，
+仓库里只有占位地址）。
 
 - 交互：点中间大面板 → 左侧滑出频道抽屉（可滚动，按 **央视 → 地方卫视 → 其他**
   分组排序，组内按名称），点频道即换台并收起；底部有播放/暂停和上一台/下一台，
@@ -103,7 +115,7 @@ tileview 第 4 页是 IPTV：开机后自动从 `TV_LIST_URL`（在 `main/tv_con
   PAT → PMT → 只挑音频流 → PES 重组；esp_audio_codec 自带的 TS 解析器对
   HEVC-first 的 PMT 选流会出错，所以自己写了）→ esp_audio_codec AAC 解码 →
   现有输出管线（频谱/音量/ES8311 全部复用）。
-- 频道表地址改 `main/tv_config.h`（复制 `tv_config.h.example`，已 gitignore）。
+- 频道表地址在网页里改（存 NVS），编译期默认值见 `main/tv_config.h`。
   m3u 是运行时解析的，频道名用 14px 字体 + 内置思源黑体 CJK 兜底
   （`CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_16_CJK`，约 +154 KB flash），
   任意生僻字都能显示。
@@ -112,6 +124,38 @@ tileview 第 4 页是 IPTV：开机后自动从 `TV_LIST_URL`（在 `main/tv_con
 - `udp://@` 组播源暂不支持（列表里会保留，点播时提示）——需要 udpxy 转 http。
 - `udp://@` 之外的所有条目按 TS over HTTP 处理；fMP4（`#EXT-X-MAP`）的
   HLS 会提示暂不支持。
+
+## 系统设置与网页配置
+
+设置项统一存在 NVS（namespace `cfg`，一个 blob，滑块松手/网页 POST 时才写 flash），
+编译期默认值来自 `main/wifi_app_secret.h` 和 `main/tv_config.h`。
+
+**设备上有两个入口**：
+
+1. 第 5 页“设置”：音量 / 亮度两个滑块、自动熄屏（点一下循环 0/1/5/10/30 分钟）、
+   手机配网、重启、恢复出厂，底部显示 Wi-Fi、IP 和网页地址。
+2. 网页 `http://<设备IP>/`（连上 Wi-Fi 后一直可用）：除上面这些，还能扫描附近 Wi-Fi、
+   改 Wi-Fi 账号密码、改频道表地址、看内存/运行时间。
+
+**没配网 / 想换网络时**：开机没有可用凭据（或从设置页点“手机配网”、网页点“进入配网热点模式”）
+会开一个开放热点 **`DesktopClock-Setup`**，手机连上去打开 `http://192.168.4.1` 就能配网，
+配网模式 **5 分钟无操作自动重启**，回到正常 STA 模式。
+
+接口（都是 JSON）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/` | 设置页面（单文件内嵌 HTML） |
+| GET | `/api/status` | 连接状态、IP/RSSI、堆内存、运行时间、当前音量/亮度/熄屏/频道表地址 |
+| GET | `/api/scan` | 扫描附近热点（最多 30 个） |
+| POST | `/api/wifi` | `{ssid,pass}` 保存后重启 |
+| POST | `/api/settings` | `{volume,brightness,sleep,tvurl}` 立即生效并落盘 |
+| POST | `/api/restart` | 保存并重启 |
+| POST | `/api/factory` | 清空 NVS 设置并重启 |
+| POST | `/api/apmode` | 切到配网热点模式 |
+
+背光：GPIO41 由 LEDC PWM 驱动（5 kHz、10 bit），熄屏 = duty 0，系统其余部分照常运行；
+触摸任意位置会唤醒（并吞掉这次点击，避免误触控件）。
 
 ## 环境搭建踩坑记录（macOS x86_64 + 系统 Python 3.9）
 
@@ -226,9 +270,9 @@ lv_display_set_rotation(disp, LANDSCAPE_ROTATION);
 ## 已知问题 / 待办
 
 - 中文字体是 `font_cn_14/16.c` 与 `font_radio_14/20.c` 的子集，**新增任何汉字都会显示空白**：
-  收音机页改文案后用 `tools/gen_radio_font.sh` 重新生成，时钟/天气页仍按原来的
-  `lv_font_conv` 命令生成
-- 蓝牙已关闭（`CONFIG_BT_ENABLED=n`）以腾出内部 RAM；要用 BLE 时在 sdkconfig 重新打开
+  收音机/电视/设置页/网页改文案后用 `tools/gen_radio_font.sh` 重新生成（需要 `lv_font_conv`），
+  时钟/天气页仍按原来的 `lv_font_conv` 命令生成
+- 蓝牙本期未做：`CONFIG_BT_ENABLED=n` 腾出内部 RAM；以后要用 BLE 时在 sdkconfig 重新打开
 - 编译优化已从 Debug 改为 `-O2`（`CONFIG_COMPILER_OPTIMIZATION_PERF=y`），
   软件旋转 + MP3 解码需要这部分 CPU 余量
 - 16MB flash 只用 3MB app 分区，其余空闲（未挂 SPIFFS/LittleFS）；收音机缓冲放在 PSRAM

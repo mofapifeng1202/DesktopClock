@@ -67,7 +67,8 @@ SYMS=$(python3 - "$MAIN" <<'PY'
 import os, sys
 main = sys.argv[1]
 text = ""
-for name in ("radio.c", "radio_ui.c", "radio_stations.h"):
+for name in ("radio.c", "radio_ui.c", "radio_stations.h",
+             "tv_ui.c", "media_list.c", "settings_ui.c", "web_config.c"):
     with open(os.path.join(main, name), encoding="utf-8") as f:
         text += f.read()
 keep_extra = "·，。！？：；（）“”‘’—…"

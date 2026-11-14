@@ -16,7 +16,9 @@
 #include "clock_ui.h"
 #include "main.h"
 #include "radio_ui.h"
+#include "settings_ui.h"
 #include "tv_ui.h"
+#include "ui_sync.h"
 #include "weather.h"
 #include "wifi_app.h"
 
@@ -105,9 +107,8 @@ static void vol_cb(lv_event_t *e)
         return;
     }
     int vol = (int)lv_slider_get_value(lv_event_get_target(e));
-    audio_set_vol(vol);
     update_vol_widgets(vol);
-    radio_ui_set_volume(vol);
+    ui_sync_volume(vol);
 }
 
 void clock_ui_set_volume(int vol)
@@ -296,6 +297,10 @@ void clock_ui_build(void)
     /* IPTV page */
     lv_obj_t *tile_tv = lv_tileview_add_tile(tv, 3, 0, LV_DIR_HOR);
     tv_ui_build(tile_tv);
+
+    /* settings page */
+    lv_obj_t *tile_set = lv_tileview_add_tile(tv, 4, 0, LV_DIR_HOR);
+    settings_ui_build(tile_set);
 
     lv_timer_create(tick_cb, 1000, NULL);
     update_status();
