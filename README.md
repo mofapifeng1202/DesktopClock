@@ -150,8 +150,8 @@ tileview 第 4 页是 IPTV：开机后自动从频道表地址拉取 m3u 并解�
   其他城市在天气网上搜到对应城市后，地址栏里就是那个 9 位数字。
 - 换源/换城市后 `weather_refresh()` 会让后台任务立刻重试；取不到数据时 1 分钟后重试，
   成功则 30 分钟一次。串口每次失败都会打印 `weather: fetch failed ... url=...`。
-- 时钟/天气页的城市名是动态的，任意城市名都能显示（`font_cn_14/16` 现在挂了
-  `font_zh_14` 兜底字体）。
+- 时钟/天气页的城市名、天气描述都是运行时来的，靠两级兜底字体（一级+二级 GB2312）保证
+  不会出现占位方框；字符串按 UTF-8 边界截断，不会切出半个汉字。
 
 ## 系统设置与网页配置
 
@@ -375,8 +375,18 @@ lv_display_set_rotation(disp, LANDSCAPE_ROTATION);
 生成的子集（只含界面用到的汉字 + ASCII 0x20-0x7E），源字体采用
 **SIL Open Font License 1.1**，许可全文见 `LICENSES/OFL-NotoSansCJK.txt`。
 
-`main/font_zh_14.c` 是 GB2312 一级 3755 个常用汉字的 14px 全量字体，作为
-`font_radio_14/20`、`font_cn_14/16` 的 `.fallback`（`lv_font.c` 会逐字回退），代价约 370 KB flash。
+兜底字体链（`lv_font.c` 会逐字回退，链可以有多层）：
+
+```
+font_cn_16 / font_cn_14 ──┐
+font_radio_20 / radio_14 ─┴─► font_zh_14 (GB2312 一级 3755 字, 14px, 4bpp, ~370 KB)
+                                   └─► font_zh2_14 (GB2312 二级 3008 字, 14px, 4bpp, ~300 KB)
+```
+
+这样界面上出现的任何 GB2312 汉字都有字形。之前天气页"霾"显示成一个方框，
+就是因为它是**二级字**，既不在 `font_cn_16` 的子集里、也不在只含一级字的 `font_zh_14` 里，
+而 LVGL 的 `LV_USE_FONT_PLACEHOLDER` 会给缺字画一个占位方框（看着像乱码）。
+二级字那 300 KB 平时用不到，但天气/城市名是运行时来的，删了迟早再踩。
 它保证界面上出现任何"没进子集"的汉字时不会画成空白方块——IPTV 频道名是运行时
 从 m3u 拿的，光靠子集永远追不上。
 
@@ -401,7 +411,7 @@ npx lv_font_conv --font NotoSansCJKsc-Regular.otf --size 16 --bpp 4 \
   --lv-font-name font_cn_16 --lv-include lvgl.h -o main/font_cn_16.c
 ```
 
-> 注意：新增任何汉字都必须重新生成字体，否则该字会显示为空白。
+> 注意：新增任何汉字都必须重新生成字体（或依赖上面那两级兜底），否则该字会显示成占位方框。
 > `font_cn_14/16.c` 是手工用上面命令生成的，生成后要补上兜底链（`tools/gen_radio_font.sh`
 > 会自动给 `font_radio_*` 加）：
 >

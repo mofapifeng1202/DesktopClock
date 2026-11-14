@@ -4,7 +4,7 @@ idf_component_register(SRCS "main.c" "wifi_app.c" "weather.c" "clock_ui.c"
                              "settings.c" "backlight.c" "web_config.c"
                              "settings_ui.c" "ui_sync.c" "ui_perf.c" "wallpaper.c"
                              "font_cn_14.c" "font_cn_16.c"
-                             "font_radio_14.c" "font_radio_20.c" "font_zh_14.c"
+                             "font_radio_14.c" "font_radio_20.c" "font_zh_14.c" "font_zh2_14.c"
                        INCLUDE_DIRS "."
                        REQUIRES esp_http_client json nvs_flash esp_wifi esp_netif
                                 esp_event esp_timer mbedtls esp_adc esp_ringbuf

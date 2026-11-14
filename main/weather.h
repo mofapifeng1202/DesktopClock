@@ -17,11 +17,11 @@ typedef struct {
     int humidity;           /* % */
     int code;               /* WMO weather code, -1 when unknown */
     float wind;             /* km/h, -1 when unknown */
-    char desc[24];          /* condition text, e.g. "霾" */
+    char desc[32];          /* condition text, e.g. "霾" */
     char city[24];          /* display name of the configured city */
     struct {
         char date[8];       /* "MM-DD" */
-        char desc[16];      /* condition text */
+        char desc[24];      /* condition text */
         int code;
         float tmax, tmin;   /* °C */
     } daily[WEATHER_DAILY_DAYS];

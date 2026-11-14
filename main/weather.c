@@ -67,10 +67,28 @@ static int parse_pct(const char *s)
     return atoi(s);
 }
 
-/* "东北风" + "1级" -> 0 (no numeric speed); Open-Meteo gives km/h directly */
+/* Copy at most n-1 bytes, but never split a UTF-8 sequence: a truncated
+ * multi-byte char would be drawn as garbage ("乱码") on the panel. */
 static void copy_str(char *dst, size_t n, const char *src)
 {
-    snprintf(dst, n, "%s", src ? src : "");
+    if (dst == NULL || n == 0) {
+        return;
+    }
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+    size_t lim = n - 1;
+    size_t len = strlen(src);
+    if (len > lim) {
+        len = lim;
+        /* back off to the start of the character we would cut in half */
+        while (len > 0 && ((unsigned char)src[len] & 0xC0) == 0x80) {
+            len--;
+        }
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
 }
 
 /* ------------------------- source: 中国天气网 镜像 ------------------ */

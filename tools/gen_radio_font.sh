@@ -138,6 +138,22 @@ sys.stdout.write("".join(sorted(chars)))
 PY
 )
 
+# GB2312 level 2 (the rarer half: 霾, 郸, ...) as a second fallback layer, so
+# text coming from an API (weather condition, an unusual city name) never
+# renders as LVGL's "missing glyph" box.
+ZH2_SYMS=$(python3 - <<'PY'
+import sys
+chars = []
+for b in range(0xD8, 0xF8):
+    for t in range(0xA1, 0xFF):
+        try:
+            chars.append(bytes([b, t]).decode("gb2312"))
+        except Exception:
+            pass
+sys.stdout.write("".join(chars))
+PY
+)
+
 echo "subset symbols: $(printf '%s' "$SUBSET_SYMS" | wc -m | tr -d ' ') chars"
 echo "fallback symbols: $(printf '%s' "$ZH_SYMS" | wc -m | tr -d ' ') chars"
 
@@ -168,6 +184,18 @@ lv_font_conv \
     --force-fast-kern-format \
     -o "$MAIN/font_zh_14.c"
 
+lv_font_conv \
+    --font "$FONT_TTF" \
+    --symbols "$ZH2_SYMS" \
+    --size 14 \
+    --bpp 4 \
+    --format lvgl \
+    --lv-include lvgl.h \
+    --no-compress \
+    --force-fast-kern-format \
+    --lv-font-name font_zh2_14 \
+    -o "$MAIN/font_zh2_14.c"
+
 # Chain font_zh_14 as the fallback of the two UI fonts (lv_font_conv has no
 # option for it, and the generated struct is const, so patch the C file).
 python3 - "$MAIN" <<'PY'
@@ -181,7 +209,16 @@ for name in ("font_radio_14.c", "font_radio_20.c"):
                           "LV_FONT_DECLARE(font_zh_14);\n\n#ifndef FONT_RADIO_", 1)
     src = src.replace(".fallback = NULL,", ".fallback = &font_zh_14,", 1)
     open(path, "w", encoding="utf-8").write(src)
-print("chained font_zh_14 as fallback of font_radio_14/20")
+
+# font_zh_14 itself falls back to the level-2 font for rarer characters
+path = os.path.join(main, "font_zh_14.c")
+src = open(path, encoding="utf-8").read()
+if "LV_FONT_DECLARE(font_zh2_14)" not in src:
+    src = src.replace("#ifndef FONT_ZH_14",
+                      "LV_FONT_DECLARE(font_zh2_14);\n\n#ifndef FONT_ZH_14", 1)
+src = src.replace(".fallback = NULL,", ".fallback = &font_zh2_14,", 1)
+open(path, "w", encoding="utf-8").write(src)
+print("chained font_zh_14 after the radio fonts, font_zh2_14 after it")
 PY
 
-echo "updated $MAIN/font_radio_14.c, font_radio_20.c and font_zh_14.c"
+echo "updated $MAIN/font_radio_14.c, font_radio_20.c, font_zh_14.c and font_zh2_14.c"

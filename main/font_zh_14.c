@@ -10,6 +10,8 @@
 #include "lvgl.h"
 #endif
 
+LV_FONT_DECLARE(font_zh2_14);
+
 #ifndef FONT_ZH_14
 #define FONT_ZH_14 1
 #endif
@@ -60509,7 +60511,7 @@ lv_font_t font_zh_14 = {
 #endif
     .dsc = &font_dsc,          /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
 #if LV_VERSION_CHECK(8, 2, 0) || LVGL_VERSION_MAJOR >= 9
-    .fallback = NULL,
+    .fallback = &font_zh2_14,
 #endif
     .user_data = NULL,
 };
