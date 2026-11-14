@@ -82,15 +82,28 @@ static const char *TAG = "st77922";
 
 #define LCD_H_RES       480            /* logical / rotated resolution */
 #define LCD_V_RES       320
-/* One 28-line buffer instead of two 16-line ones: taller strips mean fewer
- * per-area passes over the object tree, which is what costs the time here
- * (measured full repaint: 20 strips 46 ms, 12 strips 40 ms, 10 strips 36 ms).
- * 24 lines = more headroom, 32 lines = fastest but only ~32 KB internal free. */
-#define LCD_BUF_LINES   28
-#define LCD_DOUBLE_BUF  0
-#ifndef LCD_QSPI_PCLK_HZ
-#define LCD_QSPI_PCLK_HZ (80 * 1000 * 1000)
-#endif
+/* Display buffer presets, selectable from the web page (applied at boot).
+ * Taller strips mean fewer per-area passes over the object tree, which is what
+ * a full repaint costs here; measured full repaint at 40 MHz: 2x16 lines
+ * (double buffered) 46 ms, 1x24 47 ms, 1x28 48 ms, 1x32 47 ms, and at 80 MHz
+ * 1x28 40 ms. Bigger buffers also eat internal RAM. */
+typedef struct {
+    int lines;
+    bool double_buf;
+    const char *name;
+} lcd_mode_t;
+
+static const lcd_mode_t k_lcd_modes[] = {
+    {16, true,  "2x16 双缓冲（最省事，内存最宽裕）"},
+    {24, false, "1x24 单缓冲"},
+    {28, false, "1x28 单缓冲（默认）"},
+    {32, false, "1x32 单缓冲（最快，内存最紧）"},
+};
+#define LCD_MODE_COUNT (sizeof(k_lcd_modes) / sizeof(k_lcd_modes[0]))
+/* The QSPI pixel clock is a setting (40 MHz = the module's rating, up to 80);
+ * a clock that is too fast for the wiring shows up as speckles / garbled
+ * areas on the panel. Applied at boot, change it in the web page. */
+#define LCD_QSPI_PCLK_MHZ_DEFAULT 40
 
 /* Touch transform: NONE. LVGL already rotates indev input for a rotated display
  * (lv_indev.c -> lv_display_rotate_point(): X = ver_res-1-y, Y = x) and it expects the
@@ -882,10 +895,18 @@ void app_main(void)
     wallpaper_init();
     backlight_init();          /* dark until the panel is initialised */
 
+    int lcd_mode = settings_get()->lcd_mode;
+    if (lcd_mode < 0 || lcd_mode >= (int)LCD_MODE_COUNT) {
+        lcd_mode = 2;
+    }
+    const int buf_lines = k_lcd_modes[lcd_mode].lines;
+    const bool buf_double = k_lcd_modes[lcd_mode].double_buf;
+    ESP_LOGI(TAG, "display mode %d: %s", lcd_mode, k_lcd_modes[lcd_mode].name);
+
     ESP_LOGI(TAG, "Initialize QSPI bus");
     const spi_bus_config_t buscfg = ST77922_PANEL_BUS_QSPI_CONFIG(
         PIN_LCD_PCLK, PIN_LCD_D0, PIN_LCD_D1, PIN_LCD_D2, PIN_LCD_D3,
-        LCD_H_RES * LCD_BUF_LINES * sizeof(uint16_t));
+        LCD_H_RES * buf_lines * sizeof(uint16_t));
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     ESP_LOGI(TAG, "Install panel IO");
@@ -894,7 +915,11 @@ void app_main(void)
         ST77922_PANEL_IO_QSPI_CONFIG(PIN_LCD_CS, NULL, NULL);
     /* The macro ships 40 MHz. The panel tolerates more, and the 480x320 frame
      * is 307 KB, so the bus is a large part of the frame time. */
-    io_config.pclk_hz = LCD_QSPI_PCLK_HZ;
+    int lcd_mhz = settings_get()->lcd_mhz;
+    if (lcd_mhz < 20 || lcd_mhz > 80) {
+        lcd_mhz = LCD_QSPI_PCLK_MHZ_DEFAULT;
+    }
+    io_config.pclk_hz = (uint32_t)lcd_mhz * 1000 * 1000;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle));
 
     ESP_LOGI(TAG, "Install ST77922 driver");
@@ -933,8 +958,8 @@ void app_main(void)
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle = io_handle,
         .panel_handle = panel_handle,
-        .buffer_size = LCD_H_RES * LCD_BUF_LINES,
-        .double_buffer = LCD_DOUBLE_BUF,
+        .buffer_size = LCD_H_RES * buf_lines,
+        .double_buffer = buf_double,
         .hres = LCD_PANEL_H_RES,
         .vres = LCD_PANEL_V_RES,
         .monochrome = false,
@@ -957,6 +982,7 @@ void app_main(void)
      * native portrait MADCTL and LVGL rotates each flushed area. */
     lv_display_set_rotation(disp, LANDSCAPE_ROTATION);
     ui_perf_attach(disp);
+    ESP_LOGI(TAG, "QSPI pixel clock %d MHz", lcd_mhz);
     ESP_LOGI(TAG, "display %dx%d (panel %dx%d, sw rotation %d)",
              (int)lv_display_get_horizontal_resolution(disp),
              (int)lv_display_get_vertical_resolution(disp),

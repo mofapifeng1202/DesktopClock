@@ -5,6 +5,7 @@
  * brightness 100, sleep 5 min, Wi-Fi from main/wifi_app_secret.h, TV playlist
  * from main/tv_config.h (both compile-time fallbacks for first boot).
  */
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -37,18 +38,6 @@ typedef struct {
 
 const int k_sleep_choices[SETTINGS_SLEEP_CHOICES] = {0, 1, 5, 10, 30};
 
-/* Layout of the blob written before the weather settings existed; used to
- * migrate an existing device instead of resetting everything (which would
- * throw away the Wi-Fi credentials and volume). */
-typedef struct {
-    char wifi_ssid[33];
-    char wifi_pass[65];
-    char tv_url[193];
-    int volume;
-    int brightness;
-    int sleep_min;
-} settings_v0_t;
-
 static settings_t s_cfg;
 static bool s_dirty;
 
@@ -66,6 +55,8 @@ static void load_defaults(void)
     snprintf(s_cfg.wx_code, sizeof(s_cfg.wx_code), "101040100");
     s_cfg.wx_lat_x100 = 2956;
     s_cfg.wx_lon_x100 = 10655;
+    s_cfg.lcd_mhz = 40;             /* the module's rated QSPI clock */
+    s_cfg.lcd_mode = 2;             /* single buffer, 28 lines */
 }
 
 void settings_init(void)
@@ -76,22 +67,8 @@ void settings_init(void)
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
         cfg_blob_t blob;
         size_t len = sizeof(blob);
-        if (nvs_get_blob(h, NVS_KEY, &blob, &len) == ESP_OK &&
-            len == sizeof(uint32_t) + sizeof(settings_v0_t) &&
-            blob.magic == CFG_MAGIC) {
-            /* old blob: keep everything that still exists */
-            settings_v0_t old;
-            memcpy(&old, &blob.s, sizeof(old));
-            memcpy(s_cfg.wifi_ssid, old.wifi_ssid, sizeof(s_cfg.wifi_ssid));
-            memcpy(s_cfg.wifi_pass, old.wifi_pass, sizeof(s_cfg.wifi_pass));
-            memcpy(s_cfg.tv_url, old.tv_url, sizeof(s_cfg.tv_url));
-            s_cfg.volume = old.volume;
-            s_cfg.brightness = old.brightness;
-            s_cfg.sleep_min = old.sleep_min;
-            s_dirty = true;
-            ESP_LOGI(TAG, "migrated settings from an older layout");
-        } else if (nvs_get_blob(h, NVS_KEY, &blob, &len) == ESP_OK &&
-            len == sizeof(blob) && blob.magic == CFG_MAGIC) {
+        esp_err_t r = nvs_get_blob(h, NVS_KEY, &blob, &len);
+        if (r == ESP_OK && blob.magic == CFG_MAGIC && len == sizeof(blob)) {
             s_cfg = blob.s;
 
             /* A blob written by an older build may have empty strings. */
@@ -102,13 +79,38 @@ void settings_init(void)
             if (s_cfg.brightness > 100) s_cfg.brightness = 100;
             if (s_cfg.volume < 0) s_cfg.volume = 0;
             if (s_cfg.volume > 100) s_cfg.volume = 100;
-            ESP_LOGI(TAG, "loaded: ssid=\"%s\" vol=%d bright=%d sleep=%d wx=%d/%s",
+            if (s_cfg.lcd_mhz < 20 || s_cfg.lcd_mhz > 80) s_cfg.lcd_mhz = 40;
+            if (s_cfg.lcd_mode < 0 || s_cfg.lcd_mode > 3) s_cfg.lcd_mode = 2;
+            ESP_LOGI(TAG, "loaded: ssid=\"%s\" vol=%d bright=%d sleep=%d wx=%d/%s lcd=%dMHz",
                      s_cfg.wifi_ssid, s_cfg.volume, s_cfg.brightness, s_cfg.sleep_min,
-                     s_cfg.wx_src, s_cfg.wx_city);
+                     s_cfg.wx_src, s_cfg.wx_city, s_cfg.lcd_mhz);
+        } else if (r == ESP_OK && blob.magic == CFG_MAGIC && len > sizeof(uint32_t)) {
+            /* Older, shorter blob: copy whatever part of the layout it had, so
+             * adding settings does not throw away the Wi-Fi credentials. */
+            size_t have = len - sizeof(uint32_t);
+            size_t prefix = offsetof(settings_t, wx_src);
+            if (have < prefix) {
+                prefix = have;
+            }
+            memcpy(&s_cfg, &blob.s, prefix);
+            if (have >= offsetof(settings_t, lcd_mhz)) {
+                memcpy(&s_cfg.wx_src, &blob.s.wx_src, offsetof(settings_t, lcd_mhz) - offsetof(settings_t, wx_src));
+            } else {
+                s_cfg.wx_src = WX_SRC_CN;
+                snprintf(s_cfg.wx_city, sizeof(s_cfg.wx_city), "重庆");
+                snprintf(s_cfg.wx_code, sizeof(s_cfg.wx_code), "101040100");
+                s_cfg.wx_lat_x100 = 2956;
+                s_cfg.wx_lon_x100 = 10655;
+            }
+            s_dirty = true;
+            ESP_LOGI(TAG, "migrated settings from a %u byte blob", (unsigned)len);
         } else {
             ESP_LOGI(TAG, "no saved settings, using defaults");
         }
         nvs_close(h);
+    }
+    if (s_dirty) {
+        settings_save();        /* persist a migrated layout right away */
     }
     s_dirty = false;
 }
@@ -178,6 +180,26 @@ void settings_set_tv_url(const char *url)
     }
     snprintf(s_cfg.tv_url, sizeof(s_cfg.tv_url), "%s", url);
     s_dirty = true;
+}
+
+void settings_set_lcd_mode(int mode)
+{
+    if (mode < 0) mode = 0;
+    if (mode > 3) mode = 3;
+    if (s_cfg.lcd_mode != mode) {
+        s_cfg.lcd_mode = mode;
+        s_dirty = true;
+    }
+}
+
+void settings_set_lcd_mhz(int mhz)
+{
+    if (mhz < 20) mhz = 20;
+    if (mhz > 80) mhz = 80;
+    if (s_cfg.lcd_mhz != mhz) {
+        s_cfg.lcd_mhz = mhz;
+        s_dirty = true;
+    }
 }
 
 void settings_set_weather(int src, const char *city, const char *code,

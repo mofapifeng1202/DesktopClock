@@ -74,6 +74,15 @@ static const char s_html[] =
 "<select id='sleep' onchange='saveSett()'>"
 "<option value='0'>从不</option><option value='1'>1 分钟</option><option value='5'>5 分钟</option>"
 "<option value='10'>10 分钟</option><option value='30'>30 分钟</option></select>"
+"<h2>屏幕</h2>"
+"<select id='lcdmode'><option value='0'>2×16 双缓冲（最保守）</option>"
+"<option value='1'>1×24 单缓冲</option><option value='2'>1×28 单缓冲（默认）</option>"
+"<option value='3'>1×32 单缓冲（最快 / 内存最紧）</option></select>"
+"<select id='lcdmhz'><option value='20'>20 MHz（最保守）</option>"
+"<option value='40'>40 MHz（模组标称，推荐）</option>"
+"<option value='60'>60 MHz</option><option value='80'>80 MHz（最快，可能花屏）</option></select>"
+"<div style='font-size:13px;color:#8fb0d0;margin:6px 0'>屏幕出现花点/错位就调低一档。改完会自动重启生效。</div>"
+"<button onclick='saveLcd()'>保存并重启</button>"
 "<h2>天气</h2>"
 "<select id='wxsrc'><option value='0'>中国天气网（城市编码，国内直连，推荐）</option>"
 "<option value='1'>Open-Meteo（经纬度，需能访问境外）</option>"
@@ -150,6 +159,8 @@ static const char s_html[] =
 "o.textContent=c[0]+' ('+c[1]+')';document.getElementById('wxcitysel').appendChild(o)});"
 "function pickCity(){const v=$('wxcitysel').value;if(v==='')return;const c=CITIES[+v];"
 "$('wxcity').value=c[0];$('wxcode').value=c[1];$('wxlat').value=c[2].toFixed(2);$('wxlon').value=c[3].toFixed(2)}"
+"function saveLcd(){post('/api/settings',{lcdmhz:+$('lcdmhz').value,lcdmode:+$('lcdmode').value}).then(()=>{"
+"document.body.innerHTML='<h1>已保存，重启中…</h1><p>等 10 秒后刷新本页。</p>'})}"
 "function saveWx(){post('/api/settings',{wxsrc:+$('wxsrc').value,wxcity:$('wxcity').value.trim(),"
 "wxcode:$('wxcode').value.trim(),wxlat:parseFloat($('wxlat').value)||0,"
 "wxlon:parseFloat($('wxlon').value)||0}).then(()=>{$('wxnow').textContent='已保存，正在刷新天气…'})}"
@@ -158,6 +169,7 @@ static const char s_html[] =
 "$('vol').value=d.vol;$('volv').textContent=d.vol;$('bri').value=d.bright;$('briv').textContent=d.bright+'%';"
 "$('sleep').value=d.sleep;$('tvurl').value=d.tvurl;"
 "$('bgst').textContent=d.bg?'已设置背景图（flash 里有一张）':'未设置：使用纯色背景';"
+"$('lcdmhz').value=d.lcdmhz;$('lcdmode').value=d.lcdmode;"
 "$('wxsrc').value=d.wxsrc;$('wxcity').value=d.wxcity;$('wxcode').value=d.wxcode;"
 "if(!$('wxlat').value)$('wxlat').value=(d.wxlat/100).toFixed(2);"
 "if(!$('wxlon').value)$('wxlon').value=(d.wxlon/100).toFixed(2);"
@@ -231,6 +243,8 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddStringToObject(r, "tvurl", c->tv_url);
     cJSON_AddBoolToObject(r, "ap", s_ap_mode);
     cJSON_AddBoolToObject(r, "bg", wallpaper_present());
+    cJSON_AddNumberToObject(r, "lcdmhz", c->lcd_mhz);
+    cJSON_AddNumberToObject(r, "lcdmode", c->lcd_mode);
     cJSON_AddNumberToObject(r, "wxsrc", c->wx_src);
     cJSON_AddStringToObject(r, "wxcity", c->wx_city);
     cJSON_AddStringToObject(r, "wxcode", c->wx_code);
@@ -330,6 +344,24 @@ static esp_err_t h_settings(httpd_req_t *req)
         settings_set_tv_url(tv->valuestring);
     }
 
+    cJSON *lcd = cJSON_GetObjectItem(j, "lcdmhz");
+    bool need_restart = false;
+    if (cJSON_IsNumber(lcd)) {
+        int mhz = (int)lcd->valuedouble;
+        if (mhz != settings_get()->lcd_mhz) {
+            need_restart = true;
+        }
+        settings_set_lcd_mhz(mhz);
+    }
+    cJSON *lmode = cJSON_GetObjectItem(j, "lcdmode");
+    if (cJSON_IsNumber(lmode)) {
+        int mode = (int)lmode->valuedouble;
+        if (mode != settings_get()->lcd_mode) {
+            need_restart = true;
+        }
+        settings_set_lcd_mode(mode);
+    }
+
     cJSON *wsrc = cJSON_GetObjectItem(j, "wxsrc");
     if (cJSON_IsNumber(wsrc)) {
         cJSON *wcity = cJSON_GetObjectItem(j, "wxcity");
@@ -348,7 +380,12 @@ static esp_err_t h_settings(httpd_req_t *req)
     cJSON_Delete(j);
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", true);
-    return send_json(req, r);
+    cJSON_AddBoolToObject(r, "restart", need_restart);
+    send_json(req, r);
+    if (need_restart) {
+        do_restart_soon();     /* the QSPI clock is fixed at panel init */
+    }
+    return ESP_OK;
 }
 
 /* GET  /api/bg            -> {present:bool}

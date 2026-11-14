@@ -30,6 +30,9 @@ typedef struct {
     char wx_code[16];  /* 中国天气网 city code, e.g. "101040100" */
     int wx_lat_x100;   /* latitude  x 100 for the coordinate based sources */
     int wx_lon_x100;   /* longitude x 100 */
+    /* display */
+    int lcd_mhz;       /* QSPI pixel clock in MHz; lower it if the panel glitches */
+    int lcd_mode;      /* display buffer preset, see LCD_MODE_* in main.c */
 } settings_t;
 
 #define SETTINGS_SLEEP_CHOICES 5
@@ -46,6 +49,8 @@ void settings_set_wifi(const char *ssid, const char *pass);
 void settings_set_tv_url(const char *url);
 void settings_set_weather(int src, const char *city, const char *code,
                           int lat_x100, int lon_x100);
+void settings_set_lcd_mhz(int mhz);      /* 20..80, takes effect after reboot */
+void settings_set_lcd_mode(int mode);     /* 0..3 buffer preset, needs a reboot */
 
 /* Persist to NVS (no-op when nothing changed). */
 void settings_save(void);
