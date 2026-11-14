@@ -24,6 +24,7 @@
 #include "clock_ui.h"
 #include "tv_ui.h"
 #include "wallpaper.h"
+#include "weather.h"
 #include "esp_lvgl_port.h"
 #include "ui_perf.h"
 #include "main.h"
@@ -73,6 +74,17 @@ static const char s_html[] =
 "<select id='sleep' onchange='saveSett()'>"
 "<option value='0'>从不</option><option value='1'>1 分钟</option><option value='5'>5 分钟</option>"
 "<option value='10'>10 分钟</option><option value='30'>30 分钟</option></select>"
+"<h2>天气</h2>"
+"<select id='wxsrc'><option value='0'>中国天气网（城市编码，国内直连，推荐）</option>"
+"<option value='1'>Open-Meteo（经纬度，需能访问境外）</option>"
+"<option value='2'>wttr.in（经纬度，境外）</option></select>"
+"<select id='wxcitysel' onchange='pickCity()'><option value=''>— 选一个城市自动填好 —</option></select>"
+"<input class='txt' id='wxcity' placeholder='显示名称，如 重庆'>"
+"<input class='txt' id='wxcode' placeholder='城市编码（中国天气网），如 101040100'>"
+"<input class='txt' id='wxlat' placeholder='纬度，如 29.56'>"
+"<input class='txt' id='wxlon' placeholder='经度，如 106.55'>"
+"<button onclick='saveWx()'>保存天气设置并刷新</button>"
+"<div id='wxnow' style='font-size:13px;color:#8fb0d0;margin:6px 0'></div>"
 "<h2>电视频道表</h2>"
 "<input class='txt' id='tvurl' placeholder='http://.../interface.m3u'>"
 "<button onclick='saveSett()'>保存频道表地址</button>"
@@ -115,11 +127,41 @@ static const char s_html[] =
 "async function clearBg(){if(!confirm('恢复纯色背景?'))return;"
 "const j=await post('/api/bg',{clear:1});"
 "$('bgst').textContent=j.ok?'已恢复纯色背景':'失败'}"
+"const CITIES=[[\"北京\",\"101010100\",39.90,116.41],[\"上海\",\"101020100\",31.23,121.47],"
+"[\"天津\",\"101030100\",39.13,117.20],[\"重庆\",\"101040100\",29.56,106.55],"
+"[\"广州\",\"101280101\",23.13,113.26],[\"深圳\",\"101280601\",22.54,114.06],"
+"[\"杭州\",\"101210101\",30.27,120.16],[\"南京\",\"101190101\",32.06,118.80],"
+"[\"武汉\",\"101200101\",30.59,114.30],[\"成都\",\"101270101\",30.57,104.07],"
+"[\"西安\",\"101110101\",34.34,108.94],[\"苏州\",\"101190401\",31.30,120.59],"
+"[\"郑州\",\"101180101\",34.75,113.62],[\"长沙\",\"101250101\",28.23,112.94],"
+"[\"沈阳\",\"101070101\",41.80,123.43],[\"青岛\",\"101120201\",36.07,120.38],"
+"[\"大连\",\"101070201\",38.91,121.61],[\"厦门\",\"101230201\",24.48,118.09],"
+"[\"昆明\",\"101290101\",25.04,102.71],[\"南昌\",\"101240101\",28.68,115.86],"
+"[\"福州\",\"101230101\",26.07,119.30],[\"合肥\",\"101220101\",31.82,117.23],"
+"[\"济南\",\"101120101\",36.65,117.12],[\"哈尔滨\",\"101050101\",45.80,126.53],"
+"[\"长春\",\"101060101\",43.82,125.32],[\"石家庄\",\"101090101\",38.04,114.51],"
+"[\"太原\",\"101100101\",37.87,112.55],[\"南宁\",\"101300101\",22.82,108.37],"
+"[\"贵阳\",\"101260101\",26.65,106.63],[\"兰州\",\"101160101\",36.06,103.83],"
+"[\"乌鲁木齐\",\"101130101\",43.83,87.62],[\"呼和浩特\",\"101080101\",40.84,111.75],"
+"[\"海口\",\"101310101\",20.04,110.32],[\"银川\",\"101170101\",38.49,106.23],"
+"[\"西宁\",\"101150101\",36.62,101.78],[\"拉萨\",\"101140101\",29.65,91.14],"
+"[\"香港\",\"101320101\",22.32,114.17],[\"台北\",\"101340101\",25.03,121.57]];"
+"CITIES.forEach((c,i)=>{const o=document.createElement('option');o.value=i;"
+"o.textContent=c[0]+' ('+c[1]+')';document.getElementById('wxcitysel').appendChild(o)});"
+"function pickCity(){const v=$('wxcitysel').value;if(v==='')return;const c=CITIES[+v];"
+"$('wxcity').value=c[0];$('wxcode').value=c[1];$('wxlat').value=c[2].toFixed(2);$('wxlon').value=c[3].toFixed(2)}"
+"function saveWx(){post('/api/settings',{wxsrc:+$('wxsrc').value,wxcity:$('wxcity').value.trim(),"
+"wxcode:$('wxcode').value.trim(),wxlat:parseFloat($('wxlat').value)||0,"
+"wxlon:parseFloat($('wxlon').value)||0}).then(()=>{$('wxnow').textContent='已保存，正在刷新天气…'})}"
 "async function tick(){const d=await get('/api/status');"
 "$('st').innerHTML=`网络: <b class='${d.state==2?'ok':'bad'}'>${d.state==2?'已连接':'未连接'}</b> ${d.ssid} · IP ${d.ip||'-'} · 信号 ${d.rssi}dBm<br>内存: 内部 ${(d.heap/1024)|0}KB / PSRAM ${(d.psram/1024)|0}KB · 运行 ${(d.up/60)|0} 分钟`;"
 "$('vol').value=d.vol;$('volv').textContent=d.vol;$('bri').value=d.bright;$('briv').textContent=d.bright+'%';"
 "$('sleep').value=d.sleep;$('tvurl').value=d.tvurl;"
-"$('bgst').textContent=d.bg?'已设置背景图（flash 里有一张）':'未设置：使用纯色背景'}"
+"$('bgst').textContent=d.bg?'已设置背景图（flash 里有一张）':'未设置：使用纯色背景';"
+"$('wxsrc').value=d.wxsrc;$('wxcity').value=d.wxcity;$('wxcode').value=d.wxcode;"
+"if(!$('wxlat').value)$('wxlat').value=(d.wxlat/100).toFixed(2);"
+"if(!$('wxlon').value)$('wxlon').value=(d.wxlon/100).toFixed(2);"
+"$('wxnow').textContent=d.wxvalid?('当前：'+d.wxcity+' '+d.wxtemp+'°C '+d.wxdesc):'还没拿到天气数据'}"
 "tick();setInterval(tick,5000);"
 "</script></body></html>";
 
@@ -189,6 +231,15 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddStringToObject(r, "tvurl", c->tv_url);
     cJSON_AddBoolToObject(r, "ap", s_ap_mode);
     cJSON_AddBoolToObject(r, "bg", wallpaper_present());
+    cJSON_AddNumberToObject(r, "wxsrc", c->wx_src);
+    cJSON_AddStringToObject(r, "wxcity", c->wx_city);
+    cJSON_AddStringToObject(r, "wxcode", c->wx_code);
+    cJSON_AddNumberToObject(r, "wxlat", c->wx_lat_x100);
+    cJSON_AddNumberToObject(r, "wxlon", c->wx_lon_x100);
+    const weather_data_t *wx = weather_get();
+    cJSON_AddBoolToObject(r, "wxvalid", wx->valid);
+    cJSON_AddNumberToObject(r, "wxtemp", (double)wx->temp);
+    cJSON_AddStringToObject(r, "wxdesc", wx->desc[0] ? wx->desc : "-");
     ui_perf_snapshot_t pf;
     ui_perf_get(&pf);
     cJSON_AddNumberToObject(r, "uiframes", pf.frames);
@@ -277,6 +328,21 @@ static esp_err_t h_settings(httpd_req_t *req)
     }
     if (cJSON_IsString(tv) && tv->valuestring[0] != '\0') {
         settings_set_tv_url(tv->valuestring);
+    }
+
+    cJSON *wsrc = cJSON_GetObjectItem(j, "wxsrc");
+    if (cJSON_IsNumber(wsrc)) {
+        cJSON *wcity = cJSON_GetObjectItem(j, "wxcity");
+        cJSON *wcode = cJSON_GetObjectItem(j, "wxcode");
+        cJSON *wlat = cJSON_GetObjectItem(j, "wxlat");
+        cJSON *wlon = cJSON_GetObjectItem(j, "wxlon");
+        int lat = cJSON_IsNumber(wlat) ? (int)(wlat->valuedouble * 100 + (wlat->valuedouble < 0 ? -0.5 : 0.5)) : 0;
+        int lon = cJSON_IsNumber(wlon) ? (int)(wlon->valuedouble * 100 + (wlon->valuedouble < 0 ? -0.5 : 0.5)) : 0;
+        settings_set_weather((int)wsrc->valuedouble,
+                             cJSON_GetStringValue(wcity),
+                             cJSON_GetStringValue(wcode), lat, lon);
+        weather_refresh();
+        ESP_LOGI(TAG, "weather settings updated");
     }
     settings_save();
     cJSON_Delete(j);

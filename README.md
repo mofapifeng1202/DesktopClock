@@ -24,7 +24,8 @@ ESP-IDF 5.4.1 + LVGL 9 + esp_lvgl_port。
 ## 功能
 
 - 时钟页：48 号数字时钟、秒、星期日期、NTP 对时状态、音量滑块
-- 天气页：重庆（写死 29.56N/106.55E）当前温度/天气/湿度/风速 + 3 天预报，Open-Meteo 免 key，30 分钟刷新
+- 天气页：当前温度/天气/湿度/风速 + 3 天预报，城市和数据源**可在网页里换**（内置 38 个城市预设），
+  30 分钟刷新，换设置后立即重取
 - 收音机页：24 个 MP3 网络电台（每页 8 个、头部 < > 翻页），播放/暂停、上一台/下一台、实时频谱与缓冲显示
 - 电视页：接入内网 IPTV（m3u 运行时解析，86 个频道），只出声音不出画面（ESP32 无法解 HEVC）
 - 设置页（第 5 页）：音量滑块、亮度滑块、自动熄屏时间、手机配网、重启、恢复出厂、Wi-Fi/网页地址
@@ -132,6 +133,25 @@ tileview 第 4 页是 IPTV：开机后自动从频道表地址拉取 m3u 并解�
 - `udp://@` 组播源暂不支持（列表里会保留，点播时提示）——需要 udpxy 转 http。
 - `udp://@` 之外的所有条目按 TS over HTTP 处理；fMP4（`#EXT-X-MAP`）的
   HLS 会提示暂不支持。
+
+## 天气数据源
+
+天气的城市和数据源都存在 NVS 里，网页"天气"一栏改，保存后马上重新拉取（不用重启）。
+
+| 数据源 | 地址 | 说明 |
+|---|---|---|
+| `WX_SRC_CN`（默认） | `t.weather.itboy.net/api/weather/city/<城市编码>` | 中国天气网镜像，**纯 HTTP、无需 key、国内直连**，直接给中文天气（霾/阴/小雨），有 3 天预报 |
+| `WX_SRC_OPENMETEO` | `api.open-meteo.com`（经纬度） | 免 key、数据规整，但**国内网络经常连不上**（实测本机 15 秒超时），适合挂梯子或海外 |
+| `WX_SRC_WTTR` | `wttr.in/<lat>,<lon>?format=...` | 免 key，给的是英文天气，固件里映射成中文；没有 3 天预报 |
+
+- 网页里选一个城市（北京/上海/重庆/广州… 共 38 个）会自动填好城市编码和经纬度；
+  也可以手填"城市编码"或"经纬度 + 显示名称"。
+- 城市编码是 [中国天气网的城市代码](http://www.weather.com.cn/)（例如重庆 `101040100`）；
+  其他城市在天气网上搜到对应城市后，地址栏里就是那个 9 位数字。
+- 换源/换城市后 `weather_refresh()` 会让后台任务立刻重试；取不到数据时 1 分钟后重试，
+  成功则 30 分钟一次。串口每次失败都会打印 `weather: fetch failed ... url=...`。
+- 时钟/天气页的城市名是动态的，任意城市名都能显示（`font_cn_14/16` 现在挂了
+  `font_zh_14` 兜底字体）。
 
 ## 系统设置与网页配置
 
@@ -351,7 +371,7 @@ lv_display_set_rotation(disp, LANDSCAPE_ROTATION);
 **SIL Open Font License 1.1**，许可全文见 `LICENSES/OFL-NotoSansCJK.txt`。
 
 `main/font_zh_14.c` 是 GB2312 一级 3755 个常用汉字的 14px 全量字体，作为
-`font_radio_14/20` 的 `.fallback`（`lv_font.c` 会逐字回退），代价约 370 KB flash。
+`font_radio_14/20`、`font_cn_14/16` 的 `.fallback`（`lv_font.c` 会逐字回退），代价约 370 KB flash。
 它保证界面上出现任何"没进子集"的汉字时不会画成空白方块——IPTV 频道名是运行时
 从 m3u 拿的，光靠子集永远追不上。
 
@@ -377,6 +397,13 @@ npx lv_font_conv --font NotoSansCJKsc-Regular.otf --size 16 --bpp 4 \
 ```
 
 > 注意：新增任何汉字都必须重新生成字体，否则该字会显示为空白。
+> `font_cn_14/16.c` 是手工用上面命令生成的，生成后要补上兜底链（`tools/gen_radio_font.sh`
+> 会自动给 `font_radio_*` 加）：
+>
+> ```bash
+> sed -i '' -e 's/#ifndef FONT_CN_/LV_FONT_DECLARE(font_zh_14);\n\n#ifndef FONT_CN_/' \
+>           -e 's/\.fallback = NULL,/.fallback = \&font_zh_14,/' main/font_cn_14.c main/font_cn_16.c
+> ```
 
 ## 许可证
 

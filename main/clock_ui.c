@@ -21,6 +21,7 @@
 #include "ui_perf.h"
 #include "wallpaper.h"
 #include "ui_sync.h"
+#include "settings.h"
 #include "weather.h"
 #include "wifi_app.h"
 
@@ -32,6 +33,7 @@ static lv_obj_t *s_time, *s_sec, *s_date, *s_ntp;
 static lv_obj_t *s_vol, *s_vol_lbl;
 static lv_obj_t *s_bat, *s_wifi;
 static lv_obj_t *s_temp, *s_cond, *s_detail, *s_upd;
+static lv_obj_t *s_city;
 static lv_obj_t *s_fore_date[WEATHER_DAILY_DAYS];
 static lv_obj_t *s_fore_cond[WEATHER_DAILY_DAYS];
 static lv_obj_t *s_fore_temp[WEATHER_DAILY_DAYS];
@@ -170,14 +172,20 @@ static void update_weather(void)
     snprintf(buf, sizeof(buf), "%.1f°C", (double)wx->temp);
     lv_label_set_text(s_temp, buf);
 
-    lv_label_set_text(s_cond, wx_text(wx->code));
+    lv_label_set_text(s_city, wx->city[0] ? wx->city : settings_get()->wx_city);
+    lv_label_set_text(s_cond, wx->desc[0] ? wx->desc : wx_text(wx->code));
 
-    snprintf(buf, sizeof(buf), "湿度 %d%%   风速 %.1f km/h", wx->humidity, (double)wx->wind);
+    if (wx->wind >= 0) {
+        snprintf(buf, sizeof(buf), "湿度 %d%%   风速 %.0f km/h", wx->humidity, (double)wx->wind);
+    } else {
+        snprintf(buf, sizeof(buf), "湿度 %d%%", wx->humidity);
+    }
     lv_label_set_text(s_detail, buf);
 
     for (int i = 0; i < WEATHER_DAILY_DAYS; i++) {
         lv_label_set_text(s_fore_date[i], wx->daily[i].date);
-        lv_label_set_text(s_fore_cond[i], wx_text(wx->daily[i].code));
+        lv_label_set_text(s_fore_cond[i],
+                          wx->daily[i].desc[0] ? wx->daily[i].desc : wx_text(wx->daily[i].code));
         snprintf(buf, sizeof(buf), "%.0f°C/%.0f°C", (double)wx->daily[i].tmax,
                  (double)wx->daily[i].tmin);
         lv_label_set_text(s_fore_temp[i], buf);
@@ -305,7 +313,8 @@ void clock_ui_build(void)
                "左右滑动查看天气");
 
     /* weather page: current conditions on the left, 3-day forecast on the right */
-    make_label(tile_wx, FONT_CN, 0xffffff, LV_ALIGN_TOP_LEFT, 28, 10, "重庆");
+    s_city = make_label(tile_wx, FONT_CN, 0xffffff, LV_ALIGN_TOP_LEFT, 28, 10,
+                        settings_get()->wx_city);
     s_temp = make_label(tile_wx, FONT_NUM, 0xffffff, LV_ALIGN_TOP_LEFT, 24, 34, "--.-°");
     s_cond = make_label(tile_wx, FONT_CN, 0x00c2ff, LV_ALIGN_TOP_LEFT, 210, 44, "加载中...");
     s_detail = make_label(tile_wx, FONT_CN_SM, 0x8ec5ff, LV_ALIGN_TOP_LEFT, 210, 74, " ");
