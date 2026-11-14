@@ -116,9 +116,11 @@ tileview 第 4 页是 IPTV：开机后自动从频道表地址拉取 m3u 并解�
   HEVC-first 的 PMT 选流会出错，所以自己写了）→ esp_audio_codec AAC 解码 →
   现有输出管线（频谱/音量/ES8311 全部复用）。
 - 频道表地址在网页里改（存 NVS），编译期默认值见 `main/tv_config.h`。
-  m3u 是运行时解析的，频道名用 14px 字体 + 内置思源黑体 CJK 兜底
-  （`CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_16_CJK`，约 +154 KB flash），
-  任意生僻字都能显示。
+  m3u 是运行时解析的，频道名并不写死在代码里：`tools/gen_radio_font.sh` 生成字体时
+  会抓一次当前频道表，把用到的汉字都打进 `font_radio_14/20` 的子集（快照缓存在
+  `tools/tv_chars.txt`，断网也能重新生成）；另外还有 `font_zh_14`（GB2312 一级
+  3755 个常用汉字，约 +370 KB flash）通过 `.fallback` 挂在 `font_radio_14/20` 后面，
+  所以以后网页里换一份新频道表也不会再出现"口口"空白字。
 - IPTV 预缓冲 100 KB（约 0.5 s）再开播，跨 HLS 分段的间隙不会断音；
   AAC 解码占单核 16~19%，实测连续播放无报错。flash 余量约 45%。
 - `udp://@` 组播源暂不支持（列表里会保留，点播时提示）——需要 udpxy 转 http。
@@ -269,9 +271,10 @@ lv_display_set_rotation(disp, LANDSCAPE_ROTATION);
 
 ## 已知问题 / 待办
 
-- 中文字体是 `font_cn_14/16.c` 与 `font_radio_14/20.c` 的子集，**新增任何汉字都会显示空白**：
-  收音机/电视/设置页/网页改文案后用 `tools/gen_radio_font.sh` 重新生成（需要 `lv_font_conv`），
-  时钟/天气页仍按原来的 `lv_font_conv` 命令生成
+- 中文字体是子集：`font_cn_14/16.c`（时钟/天气页）和 `font_radio_14/20.c`
+  （收音机/电视/设置页）。改这些页面的文案后跑一次 `tools/gen_radio_font.sh`；
+  电视页/设置页里子集之外的汉字（比如新频道名）由 `font_zh_14` 兜底，不会空白，
+  但只有 GB2312 一级 3755 字 + 生成时的频道名，二级生僻字仍可能缺
 - 蓝牙本期未做：`CONFIG_BT_ENABLED=n` 腾出内部 RAM；以后要用 BLE 时在 sdkconfig 重新打开
 - 编译优化已从 Debug 改为 `-O2`（`CONFIG_COMPILER_OPTIMIZATION_PERF=y`），
   软件旋转 + MP3 解码需要这部分 CPU 余量
@@ -286,12 +289,22 @@ lv_display_set_rotation(disp, LANDSCAPE_ROTATION);
 生成的子集（只含界面用到的汉字 + ASCII 0x20-0x7E），源字体采用
 **SIL Open Font License 1.1**，许可全文见 `LICENSES/OFL-NotoSansCJK.txt`。
 
-收音机页字体重新生成（需要 Node.js + lv_font_conv + fonttools）：
+`main/font_zh_14.c` 是 GB2312 一级 3755 个常用汉字的 14px 全量字体，作为
+`font_radio_14/20` 的 `.fallback`（`lv_font.c` 会逐字回退），代价约 370 KB flash。
+它保证界面上出现任何"没进子集"的汉字时不会画成空白方块——IPTV 频道名是运行时
+从 m3u 拿的，光靠子集永远追不上。
+
+收音机/电视/设置页子集 + 兜底字体一起重新生成（需要 Node.js + lv_font_conv + fonttools）：
 
 ```bash
 FONT=managed_components/lvgl__lvgl/tests/src/test_files/fonts/noto/NotoSansSC-Regular.ttf \
   ./tools/gen_radio_font.sh
 ```
+
+脚本做的事：扫描 `radio.c`/`radio_ui.c`/`radio_stations.h`/`tv_ui.c`/`media_list.c`/
+`settings_ui.c`/`web_config.c` 里的汉字，抓一次 IPTV 频道表的频道名（URL 取自
+`main/tv_config.h`，可用 `TV_URL=...` 覆盖），生成 `font_radio_14/20` 和
+`font_zh_14`，并把 `.fallback` 链好。
 
 时钟/天气页字体重新生成（需要 Node.js + lv_font_conv + Noto Sans CJK SC 的 OTF）：
 
@@ -307,5 +320,5 @@ npx lv_font_conv --font NotoSansCJKsc-Regular.otf --size 16 --bpp 4 \
 ## 许可证
 
 - 代码：[MIT](LICENSE)
-- 字体子集（`main/font_cn_*.c`、`main/font_radio_*.c`）：由 **Noto Sans CJK SC /
-  Noto Sans SC** 生成，[SIL Open Font License 1.1](LICENSES/OFL-NotoSansCJK.txt)
+- 字体子集与兜底字体（`main/font_cn_*.c`、`main/font_radio_*.c`、`main/font_zh_14.c`）：
+  由 **Noto Sans CJK SC / Noto Sans SC** 生成，[SIL Open Font License 1.1](LICENSES/OFL-NotoSansCJK.txt)
