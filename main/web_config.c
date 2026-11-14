@@ -21,6 +21,9 @@
 #include "esp_wifi.h"
 
 #include "backlight.h"
+#include "clock_ui.h"
+#include "esp_lvgl_port.h"
+#include "ui_perf.h"
 #include "main.h"
 #include "radio.h"
 #include "settings.h"
@@ -161,6 +164,13 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "sleep", c->sleep_min);
     cJSON_AddStringToObject(r, "tvurl", c->tv_url);
     cJSON_AddBoolToObject(r, "ap", s_ap_mode);
+    ui_perf_snapshot_t pf;
+    ui_perf_get(&pf);
+    cJSON_AddNumberToObject(r, "uiframes", pf.frames);
+    cJSON_AddNumberToObject(r, "uiframeus", pf.frame_us);
+    cJSON_AddNumberToObject(r, "uiflushus", pf.flush_us);
+    cJSON_AddNumberToObject(r, "uiareas", pf.areas);
+    cJSON_AddNumberToObject(r, "uikpx", pf.px_per_s / 1000);
     return send_json(req, r);
 }
 
@@ -266,6 +276,88 @@ static esp_err_t h_factory(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Force a full-screen repaint and time it: render + rotate/swap + SPI DMA for
+ * 480x320 pixels. This is the number to watch when tuning the display path. */
+static esp_err_t h_uibench(httpd_req_t *req)
+{
+    const uint32_t full_px = 480u * 320u;   /* logical screen */
+
+    /* ?rot=0 / ?rot=90 temporarily switches the software rotation off to see
+     * how much of a frame the per-flush rotation actually costs. */
+    int rot = -1;
+    char qs[32];
+    if (httpd_req_get_url_query_str(req, qs, sizeof(qs)) == ESP_OK) {
+        char val[8];
+        if (httpd_query_key_value(qs, "rot", val, sizeof(val)) == ESP_OK) {
+            rot = atoi(val);
+        }
+    }
+    lv_display_t *disp = lv_display_get_default();
+    if (rot >= 0 && lvgl_port_lock(1000)) {
+        lv_display_set_rotation(disp, rot == 0 ? LV_DISPLAY_ROTATION_0 : LV_DISPLAY_ROTATION_90);
+        lvgl_port_unlock();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    /* ?plain=1 hides the tileview, leaving just the screen background, to find
+     * the floor of a full repaint (bus + LVGL fill rate). */
+    bool plain = false;
+    {
+        char qs2[32];
+        char val[8];
+        if (httpd_req_get_url_query_str(req, qs2, sizeof(qs2)) == ESP_OK &&
+            httpd_query_key_value(qs2, "plain", val, sizeof(val)) == ESP_OK) {
+            plain = (atoi(val) != 0);
+        }
+    }
+    lv_obj_t *tv = clock_ui_tileview();
+    if (plain && tv && lvgl_port_lock(1000)) {
+        lv_obj_add_flag(tv, LV_OBJ_FLAG_HIDDEN);
+        lvgl_port_unlock();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    uint32_t px0 = ui_perf_total_px();
+    uint32_t ar0 = 0, fu0 = 0;
+    ui_perf_raw(&ar0, &fu0, NULL);
+    int64_t t0 = esp_timer_get_time();
+
+    if (lvgl_port_lock(1000)) {
+        lv_obj_invalidate(lv_screen_active());
+        lvgl_port_unlock();
+    }
+
+    int64_t deadline = t0 + 2000000;
+    uint32_t got = 0;
+    while (esp_timer_get_time() < deadline) {
+        got = ui_perf_total_px() - px0;
+        if (got >= full_px - (full_px / 100)) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    int64_t dt_us = esp_timer_get_time() - t0;
+
+    ui_perf_snapshot_t pf;
+    ui_perf_get(&pf);
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "ms", (double)dt_us / 1000.0);
+    cJSON_AddNumberToObject(r, "px", got);
+    uint32_t ar1 = 0, fu1 = 0;
+    ui_perf_raw(&ar1, &fu1, NULL);
+    cJSON_AddNumberToObject(r, "areas", (double)(ar1 - ar0));
+    cJSON_AddNumberToObject(r, "flushms", (double)(fu1 - fu0) / 1000.0);
+    if (plain && tv && lvgl_port_lock(1000)) {
+        lv_obj_remove_flag(tv, LV_OBJ_FLAG_HIDDEN);
+        lvgl_port_unlock();
+    }
+    if (rot >= 0 && lvgl_port_lock(1000)) {
+        lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_90);
+        lvgl_port_unlock();
+    }
+    return send_json(req, r);
+}
+
 static esp_err_t h_apmode(httpd_req_t *req)
 {
     (void)req;
@@ -282,7 +374,7 @@ static esp_err_t h_apmode(httpd_req_t *req)
 static bool start_httpd(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 10;
+    cfg.max_uri_handlers = 12;
     cfg.stack_size = 6144;
     cfg.lru_purge_enable = true;
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
@@ -304,6 +396,10 @@ static bool start_httpd(void)
     u.uri = "/api/restart"; u.method = HTTP_POST; u.handler = h_restart;
     httpd_register_uri_handler(s_server, &u);
     u.uri = "/api/factory"; u.method = HTTP_POST; u.handler = h_factory;
+    httpd_register_uri_handler(s_server, &u);
+    u.uri = "/api/uibench"; u.method = HTTP_POST; u.handler = h_uibench;
+    httpd_register_uri_handler(s_server, &u);
+    u.uri = "/api/uibench"; u.method = HTTP_GET;  u.handler = h_uibench;
     httpd_register_uri_handler(s_server, &u);
     u.uri = "/api/apmode";  u.method = HTTP_POST; u.handler = h_apmode;
     httpd_register_uri_handler(s_server, &u);

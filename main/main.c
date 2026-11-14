@@ -58,6 +58,7 @@
 #include "media_list.h"
 #include "radio.h"
 #include "settings.h"
+#include "ui_perf.h"
 #include "weather.h"
 #include "web_config.h"
 #include "wifi_app.h"
@@ -81,6 +82,9 @@ static const char *TAG = "st77922";
 #define LCD_H_RES       480            /* logical / rotated resolution */
 #define LCD_V_RES       320
 #define LCD_BUF_LINES   16
+#ifndef LCD_QSPI_PCLK_HZ
+#define LCD_QSPI_PCLK_HZ (80 * 1000 * 1000)
+#endif
 
 /* Touch transform: NONE. LVGL already rotates indev input for a rotated display
  * (lv_indev.c -> lv_display_rotate_point(): X = ver_res-1-y, Y = x) and it expects the
@@ -879,8 +883,11 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Install panel IO");
     esp_lcd_panel_io_handle_t io_handle = NULL;
-    const esp_lcd_panel_io_spi_config_t io_config =
+    esp_lcd_panel_io_spi_config_t io_config =
         ST77922_PANEL_IO_QSPI_CONFIG(PIN_LCD_CS, NULL, NULL);
+    /* The macro ships 40 MHz. The panel tolerates more, and the 480x320 frame
+     * is 307 KB, so the bus is a large part of the frame time. */
+    io_config.pclk_hz = LCD_QSPI_PCLK_HZ;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle));
 
     ESP_LOGI(TAG, "Install ST77922 driver");
@@ -942,6 +949,7 @@ void app_main(void)
     /* Switch the logical resolution to 480x320; with sw_rotate the panel keeps its
      * native portrait MADCTL and LVGL rotates each flushed area. */
     lv_display_set_rotation(disp, LANDSCAPE_ROTATION);
+    ui_perf_attach(disp);
     ESP_LOGI(TAG, "display %dx%d (panel %dx%d, sw rotation %d)",
              (int)lv_display_get_horizontal_resolution(disp),
              (int)lv_display_get_vertical_resolution(disp),

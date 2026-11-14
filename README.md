@@ -159,6 +159,33 @@ tileview 第 4 页是 IPTV：开机后自动从频道表地址拉取 m3u 并解�
 背光：GPIO41 由 LEDC PWM 驱动（5 kHz、10 bit），熄屏 = duty 0，系统其余部分照常运行；
 触摸任意位置会唤醒（并吞掉这次点击，避免误触控件）。
 
+## 显示与流畅度（实测数据）
+
+屏幕是 QSPI 40MHz、面板原生竖屏，横屏是**软件旋转**做的，所以每一帧都要多走一遍
+"旋转 + RGB565 字节交换"。整屏 480×320 刷一次 = 153,600 像素，实测分解（`/api/uibench`）：
+
+| 项目 | 耗时 |
+|---|---|
+| 一帧完整重绘（时钟页，QSPI 80MHz） | ~46 ms（≈21 fps） |
+| 其中：软件旋转 + 字节交换 + 提交 DMA | ~11 ms |
+| 其中：等 QSPI 把 307 KB 送完（80MHz） | ~8 ms |
+| 其中：LVGL 软件渲染 | ~27 ms |
+| 只有背景、没有任何控件的整屏重绘 | ~28 ms |
+
+QSPI 时钟常量在 `main/main.c` 的 `LCD_QSPI_PCLK_HZ`（默认 80MHz，改 40MHz 可回退到
+模组标称值；只有纯色/局部刷新这种"总线瓶颈"的场景会受影响，整页重绘时间基本不变）。
+
+诊断接口（都返回 JSON）：
+
+```bash
+curl http://<ip>/api/status        # uiframes/uiframeus/uiflushus/uikpx：近 1 秒的帧统计
+curl http://<ip>/api/uibench       # 强制整屏重绘一次，返回 ms/areas/flushms
+curl "http://<ip>/api/uibench?plain=1"   # 隐藏页面内容，只画背景（测管线地板）
+curl "http://<ip>/api/uibench?rot=0"     # 临时关掉软件旋转再测（对比旋转开销）
+```
+
+串口每 10 秒打印一行 `ui: N fps-ish, frame X us, flush Y us xZ, N kpx/s`。
+
 ## 环境搭建踩坑记录（macOS x86_64 + 系统 Python 3.9）
 
 国内网络下 GitHub 基本不可用，以下组合可以完整装好：

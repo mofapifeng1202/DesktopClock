@@ -18,6 +18,7 @@
 #include "radio_ui.h"
 #include "settings_ui.h"
 #include "tv_ui.h"
+#include "ui_perf.h"
 #include "ui_sync.h"
 #include "weather.h"
 #include "wifi_app.h"
@@ -210,6 +211,7 @@ static void tick_cb(lv_timer_t *t)
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        ui_perf_log(TAG);
     }
 
     time_t now;
@@ -237,6 +239,13 @@ static void tick_cb(lv_timer_t *t)
     }
 }
 
+static lv_obj_t *s_tileview;
+
+lv_obj_t *clock_ui_tileview(void)
+{
+    return s_tileview;
+}
+
 void clock_ui_build(void)
 {
     lv_obj_t *scr = lv_screen_active();
@@ -248,6 +257,7 @@ void clock_ui_build(void)
 
     /* two swipeable pages (landscape 480x284 each) */
     lv_obj_t *tv = lv_tileview_create(scr);
+    s_tileview = tv;
     lv_obj_set_size(tv, SCR_W, SCR_H - BAR_H);
     lv_obj_align(tv, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_opa(tv, LV_OPA_TRANSP, 0);
@@ -302,6 +312,14 @@ void clock_ui_build(void)
     /* settings page */
     lv_obj_t *tile_set = lv_tileview_add_tile(tv, 4, 0, LV_DIR_HOR);
     settings_ui_build(tile_set);
+
+    /* The tiles come with the theme's opaque background; the screen already
+     * paints the same colour, so every page redraw used to fill another
+     * 480x284 rect for nothing (several ms per full-screen update). */
+    for (uint32_t i = 0; i < lv_obj_get_child_count(tv); i++) {
+        lv_obj_t *tile = lv_obj_get_child(tv, i);
+        lv_obj_set_style_bg_opa(tile, LV_OPA_TRANSP, 0);
+    }
 
     lv_timer_create(tick_cb, 1000, NULL);
     update_status();
