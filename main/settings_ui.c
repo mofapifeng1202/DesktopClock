@@ -218,9 +218,10 @@ static void tick_cb(lv_timer_t *t)
         set_text(s_wifi_lbl, "Wi-Fi 未连接");
     }
 
-    snprintf(buf, sizeof(buf), "网页设置: http://%s/   内存 %uKB",
+    snprintf(buf, sizeof(buf), "网页设置: http://%s/   内存 %uKB(最低 %uKB)",
              wifi_app_ip()[0] ? wifi_app_ip() : "192.168.4.1",
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024));
     set_text(s_about_lbl, buf);
 }
 

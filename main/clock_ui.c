@@ -203,11 +203,12 @@ static void tick_cb(lv_timer_t *t)
         lv_mem_monitor_t mon;
         lv_mem_monitor(&mon);
         ESP_LOGI(TAG, "UI alive: lvgl used %u/%u (%u%%), frag %u%%, max %u; "
-                      "int heap %u, psram %u",
+                      "int heap %u (min %u), psram %u",
                  (unsigned)(mon.total_size - mon.free_size),
                  (unsigned)mon.total_size, (unsigned)mon.used_pct,
                  (unsigned)mon.frag_pct, (unsigned)mon.max_used,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     }
 

@@ -151,7 +151,10 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddStringToObject(r, "ip", wifi_app_ip());
     cJSON_AddNumberToObject(r, "rssi", wifi_app_rssi());
     cJSON_AddNumberToObject(r, "heap", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(r, "heapmin", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(r, "heapbig", heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(r, "psram", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    cJSON_AddNumberToObject(r, "psrammin", heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
     cJSON_AddNumberToObject(r, "up", esp_timer_get_time() / 1000000);
     cJSON_AddNumberToObject(r, "vol", c->volume);
     cJSON_AddNumberToObject(r, "bright", c->brightness);
