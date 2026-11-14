@@ -14,6 +14,9 @@ void clock_ui_build(void);
 /* The 5-page tileview (NULL before clock_ui_build). */
 lv_obj_t *clock_ui_tileview(void);
 
+/* Re-read the uploaded background picture and redraw (call with the LVGL lock). */
+void clock_ui_apply_wallpaper(void);
+
 /* Update the clock page's volume slider without re-triggering audio_set_vol().
  * Used by the radio page so both sliders stay in sync. */
 void clock_ui_set_volume(int vol);

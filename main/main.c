@@ -59,6 +59,7 @@
 #include "radio.h"
 #include "settings.h"
 #include "ui_perf.h"
+#include "wallpaper.h"
 #include "weather.h"
 #include "web_config.h"
 #include "wifi_app.h"
@@ -878,6 +879,7 @@ void app_main(void)
     /* Settings + backlight PWM first: everything else reads from them. */
     nvs_init();
     settings_init();
+    wallpaper_init();
     backlight_init();          /* dark until the panel is initialised */
 
     ESP_LOGI(TAG, "Initialize QSPI bus");

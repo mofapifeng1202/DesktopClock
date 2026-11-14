@@ -19,6 +19,7 @@
 #include "settings_ui.h"
 #include "tv_ui.h"
 #include "ui_perf.h"
+#include "wallpaper.h"
 #include "ui_sync.h"
 #include "weather.h"
 #include "wifi_app.h"
@@ -241,6 +242,21 @@ static void tick_cb(lv_timer_t *t)
 
 static lv_obj_t *s_tileview;
 
+/* Use the uploaded picture (if any) as the screen background. */
+void clock_ui_apply_wallpaper(void)
+{
+    lv_obj_t *scr = lv_screen_active();
+    if (scr == NULL) {
+        return;
+    }
+    const lv_image_dsc_t *img = wallpaper_image();
+    lv_obj_set_style_bg_image_src(scr, img, 0);
+    /* With a picture the solid fill would be painted underneath it and then be
+     * covered: skip it, that is a few ms per full repaint. */
+    lv_obj_set_style_bg_opa(scr, img ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    lv_obj_invalidate(scr);
+}
+
 lv_obj_t *clock_ui_tileview(void)
 {
     return s_tileview;
@@ -250,6 +266,7 @@ void clock_ui_build(void)
 {
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x0b1b33), 0);
+    clock_ui_apply_wallpaper();
 
     /* status bar */
     s_bat = make_label(scr, FONT_CN_SM, 0x24d17e, LV_ALIGN_TOP_LEFT, 12, 8, "电量 --");

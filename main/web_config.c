@@ -23,6 +23,7 @@
 #include "backlight.h"
 #include "clock_ui.h"
 #include "tv_ui.h"
+#include "wallpaper.h"
 #include "esp_lvgl_port.h"
 #include "ui_perf.h"
 #include "main.h"
@@ -75,7 +76,11 @@ static const char s_html[] =
 "<h2>电视频道表</h2>"
 "<input class='txt' id='tvurl' placeholder='http://.../interface.m3u'>"
 "<button onclick='saveSett()'>保存频道表地址</button>"
-"<h2>系统</h2>"
+"<h2>背景图</h2>"
+"<div id='bgst' style='font-size:13px;color:#8fb0d0'>未设置：使用纯色背景</div>"
+"<input class='txt' id='bgfile' type='file' accept='image/*'>"
+"<button onclick='uploadBg()'>上传并设为背景</button>"
+"<button class='warn' onclick='clearBg()'>恢复纯色背景</button>"
 "<button onclick='apmode()'>进入配网热点模式</button>"
 "<button onclick='post(\"/api/restart\",{})'>重启设备</button>"
 "<button class='warn' onclick='if(confirm(\"确定恢复出厂设置?\"))post(\"/api/factory\",{})'>恢复出厂设置</button>"
@@ -93,10 +98,28 @@ static const char s_html[] =
 "post('/api/wifi',{ssid:s,pass:$('pass').value}).then(()=>{document.body.innerHTML='<h1>已保存，设备重启中…</h1><p>请把手机连回原来的 Wi-Fi。</p>'})}"
 "function apmode(){if(confirm('设备将开启热点 DesktopClock-Setup，5 分钟后自动重启。继续?'))"
 "post('/api/apmode',{}).then(()=>{document.body.innerHTML='<h1>配网模式已开启</h1><p>用手机连接 Wi-Fi: DesktopClock-Setup，然后打开 http://192.168.4.1</p>'})}"
+"function rgb565(file){return new Promise((res,rej)=>{const img=new Image();"
+"img.onload=()=>{const c=document.createElement('canvas');c.width=480;c.height=320;"
+"const g=c.getContext('2d');const s=Math.max(480/img.width,320/img.height);"
+"const w=img.width*s,h=img.height*s;g.drawImage(img,(480-w)/2,(320-h)/2,w,h);"
+"const d=g.getImageData(0,0,480,320).data;const o=new Uint8Array(480*320*2);"
+"for(let i=0,j=0;i<d.length;i+=4){const v=((d[i]>>3)<<11)|((d[i+1]>>2)<<5)|(d[i+2]>>3);"
+"o[j++]=v&255;o[j++]=v>>8}res(o)};"
+"img.onerror=()=>rej(new Error('无法读取图片'));"
+"img.src=URL.createObjectURL(file)})}"
+"async function uploadBg(){const f=$('bgfile').files[0];if(!f){alert('先选一张图片');return}"
+"$('bgst').textContent='正在转换并上传…';try{const buf=await rgb565(f);"
+"const r=await fetch('/api/bg',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:buf});"
+"const j=await r.json();if(j.ok){$('bgst').textContent='已设置背景（已存到 flash，重启后保留）'}else{$('bgst').textContent='失败: '+(j.err||'未知错误')}}"
+"catch(e){$('bgst').textContent='失败: '+e.message}}"
+"async function clearBg(){if(!confirm('恢复纯色背景?'))return;"
+"const j=await post('/api/bg',{clear:1});"
+"$('bgst').textContent=j.ok?'已恢复纯色背景':'失败'}"
 "async function tick(){const d=await get('/api/status');"
 "$('st').innerHTML=`网络: <b class='${d.state==2?'ok':'bad'}'>${d.state==2?'已连接':'未连接'}</b> ${d.ssid} · IP ${d.ip||'-'} · 信号 ${d.rssi}dBm<br>内存: 内部 ${(d.heap/1024)|0}KB / PSRAM ${(d.psram/1024)|0}KB · 运行 ${(d.up/60)|0} 分钟`;"
 "$('vol').value=d.vol;$('volv').textContent=d.vol;$('bri').value=d.bright;$('briv').textContent=d.bright+'%';"
-"$('sleep').value=d.sleep;$('tvurl').value=d.tvurl}"
+"$('sleep').value=d.sleep;$('tvurl').value=d.tvurl;"
+"$('bgst').textContent=d.bg?'已设置背景图（flash 里有一张）':'未设置：使用纯色背景'}"
 "tick();setInterval(tick,5000);"
 "</script></body></html>";
 
@@ -165,6 +188,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "sleep", c->sleep_min);
     cJSON_AddStringToObject(r, "tvurl", c->tv_url);
     cJSON_AddBoolToObject(r, "ap", s_ap_mode);
+    cJSON_AddBoolToObject(r, "bg", wallpaper_present());
     ui_perf_snapshot_t pf;
     ui_perf_get(&pf);
     cJSON_AddNumberToObject(r, "uiframes", pf.frames);
@@ -258,6 +282,85 @@ static esp_err_t h_settings(httpd_req_t *req)
     cJSON_Delete(j);
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", true);
+    return send_json(req, r);
+}
+
+/* GET  /api/bg            -> {present:bool}
+ * POST /api/bg            -> raw 480x320 RGB565 body, stores + applies
+ * POST /api/bg {"clear":1} -> forget it
+ * The browser does the JPEG/PNG decoding, the device only sees raw RGB565. */
+static esp_err_t h_bg(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddBoolToObject(r, "present", wallpaper_present());
+        return send_json(req, r);
+    }
+
+    cJSON *r = cJSON_CreateObject();
+
+    /* small JSON body = clear request */
+    if (req->content_len > 0 && req->content_len < 128) {
+        cJSON *j = recv_json(req);
+        bool clear = (j != NULL && cJSON_IsNumber(cJSON_GetObjectItem(j, "clear")));
+        if (j != NULL) {
+            cJSON_Delete(j);
+        }
+        if (clear) {
+            esp_err_t cerr = wallpaper_clear();
+            if (lvgl_port_lock(1000)) {
+                clock_ui_apply_wallpaper();
+                lvgl_port_unlock();
+            }
+            cJSON_AddBoolToObject(r, "ok", cerr == ESP_OK);
+            if (cerr != ESP_OK) {
+                cJSON_AddStringToObject(r, "err", esp_err_to_name(cerr));
+            }
+            return send_json(req, r);
+        }
+    }
+
+    if (req->content_len != (int)WP_BYTES) {
+        cJSON_AddBoolToObject(r, "ok", false);
+        cJSON_AddStringToObject(r, "err", "size must be 480*320*2 bytes");
+        httpd_resp_set_status(req, "400 Bad Request");
+        return send_json(req, r);
+    }
+
+    uint8_t *buf = heap_caps_malloc(WP_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        buf = heap_caps_malloc(WP_BYTES, MALLOC_CAP_8BIT);
+    }
+    if (buf == NULL) {
+        cJSON_AddBoolToObject(r, "ok", false);
+        cJSON_AddStringToObject(r, "err", "no memory");
+        return send_json(req, r);
+    }
+    int got = 0;
+    while (got < (int)WP_BYTES) {
+        int n = httpd_req_recv(req, (char *)buf + got, (int)WP_BYTES - got);
+        if (n <= 0) {
+            if (n == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue;
+            }
+            free(buf);
+            cJSON_AddBoolToObject(r, "ok", false);
+            cJSON_AddStringToObject(r, "err", "receive failed");
+            return send_json(req, r);
+        }
+        got += n;
+    }
+
+    esp_err_t err = wallpaper_save(buf, WP_BYTES);
+    free(buf);
+    if (err == ESP_OK && lvgl_port_lock(1000)) {
+        clock_ui_apply_wallpaper();
+        lvgl_port_unlock();
+    }
+    cJSON_AddBoolToObject(r, "ok", err == ESP_OK);
+    if (err != ESP_OK) {
+        cJSON_AddStringToObject(r, "err", esp_err_to_name(err));
+    }
     return send_json(req, r);
 }
 
@@ -402,7 +505,7 @@ static esp_err_t h_apmode(httpd_req_t *req)
 static bool start_httpd(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 12;
+    cfg.max_uri_handlers = 14;
     cfg.stack_size = 6144;
     cfg.lru_purge_enable = true;
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
@@ -424,6 +527,10 @@ static bool start_httpd(void)
     u.uri = "/api/restart"; u.method = HTTP_POST; u.handler = h_restart;
     httpd_register_uri_handler(s_server, &u);
     u.uri = "/api/factory"; u.method = HTTP_POST; u.handler = h_factory;
+    httpd_register_uri_handler(s_server, &u);
+    u.uri = "/api/bg";      u.method = HTTP_POST; u.handler = h_bg;
+    httpd_register_uri_handler(s_server, &u);
+    u.uri = "/api/bg";      u.method = HTTP_GET;  u.handler = h_bg;
     httpd_register_uri_handler(s_server, &u);
     u.uri = "/api/uibench"; u.method = HTTP_POST; u.handler = h_uibench;
     httpd_register_uri_handler(s_server, &u);

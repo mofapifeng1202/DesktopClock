@@ -67,6 +67,14 @@ static lv_obj_t *s_scrim;     /* dark overlay behind the drawer */
 static lv_obj_t *s_drawer_list;
 static lv_obj_t *s_drawer_title;
 static bool s_drawer_open;
+static uint32_t s_drawer_opened_ms;   /* lv_tick when the drawer was opened */
+static uint32_t s_press_x, s_press_y;
+static bool s_press_valid;
+
+/* Ghost taps on this panel are common; ignore anything that arrives right
+ * after the drawer opened, otherwise it closes again immediately. */
+#define DRAWER_GRACE_MS 700
+#define DRAWER_TAP_SLOP 45          /* px a "tap" may wander, ghost jumps exceed it */
 
 /* The channel list is virtualised: a flat item array (group headers plus
  * channels) and a handful of recycled row widgets, so opening the drawer for
@@ -282,6 +290,9 @@ static const char *group_name(int g)
 static void channel_row_cb(lv_event_t *e)
 {
     int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    if (lv_tick_elaps(s_drawer_opened_ms) < DRAWER_GRACE_MS) {
+        return;
+    }
     if (slot >= 0 && slot < DRAWER_SLOTS) {
         int idx = s_slot_chan[slot];
         if (idx >= 0 && idx < media_list_count()) {
@@ -300,11 +311,15 @@ static void list_scroll_cb(lv_event_t *e)
 static void drawer_close_anim_ready(lv_anim_t *a)
 {
     lv_obj_t *drawer = (lv_obj_t *)a->var;
-    lv_obj_add_flag(drawer, LV_OBJ_FLAG_HIDDEN);
+    /* Re-opened while the close animation was still running: keep it. */
+    if (!s_drawer_open) {
+        lv_obj_add_flag(drawer, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void drawer_slide(lv_obj_t *drawer, int32_t to, bool hide_at_end)
 {
+    lv_anim_delete(drawer, NULL);      /* a half-finished slide must not win */
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, drawer);
@@ -410,6 +425,8 @@ static void drawer_open(void)
         return;
     }
     s_drawer_open = true;
+    s_drawer_opened_ms = lv_tick_get();
+    lv_anim_delete(s_drawer, NULL);
     lv_obj_remove_flag(s_scrim, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_drawer, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_scrim);
@@ -471,6 +488,9 @@ static void drawer_close(void)
 static void scrim_cb(lv_event_t *e)
 {
     (void)e;
+    if (lv_tick_elaps(s_drawer_opened_ms) < DRAWER_GRACE_MS) {
+        return;
+    }
     drawer_close();
 }
 
@@ -478,6 +498,52 @@ static void open_cb(lv_event_t *e)
 {
     (void)e;
     drawer_open();
+}
+
+/* A touch with a few pixels of noise (this panel is very noisy) makes LVGL
+ * treat the tap as a scroll, so CLICKED never arrives. Remember where the
+ * press started and open the drawer on press-lost too when it barely moved. */
+static void card_pressed_cb(lv_event_t *e)
+{
+    lv_indev_t *indev = lv_indev_active();
+    if (indev == NULL) {
+        s_press_valid = false;
+        return;
+    }
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    s_press_x = (uint32_t)p.x;
+    s_press_y = (uint32_t)p.y;
+    s_press_valid = true;
+    (void)e;
+}
+
+static void card_released_cb(lv_event_t *e)
+{
+    s_press_valid = false;
+    (void)e;
+}
+
+static void card_press_lost_cb(lv_event_t *e)
+{
+    if (!s_press_valid) {
+        return;
+    }
+    s_press_valid = false;
+    lv_indev_t *indev = lv_indev_active();
+    if (indev == NULL) {
+        return;
+    }
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    int32_t dx = (int32_t)p.x - (int32_t)s_press_x;
+    int32_t dy = (int32_t)p.y - (int32_t)s_press_y;
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    if (dx + dy <= DRAWER_TAP_SLOP) {
+        drawer_open();
+    }
+    (void)e;
 }
 
 /* ------------------------------ tick ------------------------------ */
@@ -616,6 +682,9 @@ void tv_ui_build(lv_obj_t *parent)
     lv_obj_t *card = make_card(parent, 10, 36, 460, 150);
     lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(card, open_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(card, card_pressed_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(card, card_released_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(card, card_press_lost_cb, LV_EVENT_PRESS_LOST, NULL);
     s_now = make_label(card, F14, C_TEXT, 16, 6, "未选择频道");
     s_info = make_label(card, F14, C_DIM, 16, 26, "点击这里打开频道列表换台");
 
