@@ -33,6 +33,7 @@ static httpd_handle_t s_server;
 static bool s_started;
 static bool s_ap_mode;
 static int64_t s_ap_deadline_us;
+static esp_timer_handle_t s_ap_timer;
 
 #define AP_MODE_TIMEOUT_S 300
 
@@ -307,7 +308,7 @@ static bool start_httpd(void)
     return true;
 }
 
-static void web_wait_task(void *arg)
+static void web_monitor_task(void *arg)
 {
     (void)arg;
     while (!s_server) {
@@ -318,15 +319,24 @@ static void web_wait_task(void *arg)
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-    /* AP mode auto-exit after 5 minutes (back to normal STA boot). */
-    while (s_ap_mode) {
-        if ((esp_timer_get_time() - s_ap_deadline_us) > (int64_t)AP_MODE_TIMEOUT_S * 1000000) {
-            ESP_LOGW(TAG, "setup mode timeout, restarting");
-            esp_restart();
+    /* Stay alive (the setup AP is entered long after boot, from the settings
+     * page or the web page) and keep an eye on the deadline as a safety net;
+     * the actual timeout is an esp_timer, which cannot be starved. */
+    int tick = 0;
+    while (1) {
+        if (s_ap_mode) {
+            int64_t left = (s_ap_deadline_us - esp_timer_get_time()) / 1000000;
+            if (left <= 0) {
+                ESP_LOGW(TAG, "setup mode timeout, restarting");
+                esp_restart();
+            }
+            if (++tick >= 15) {     /* ~30 s */
+                tick = 0;
+                ESP_LOGI(TAG, "setup mode: %lld s left", (long long)left);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
-    vTaskDelete(NULL);
 }
 
 void web_config_start(void)
@@ -335,12 +345,19 @@ void web_config_start(void)
         return;
     }
     s_started = true;
-    xTaskCreate(web_wait_task, "web_wait", 4096, NULL, 3, NULL);
+    xTaskCreate(web_monitor_task, "web_mon", 3072, NULL, 3, NULL);
 }
 
 bool web_config_ap_mode(void)
 {
     return s_ap_mode;
+}
+
+static void ap_timeout_cb(void *arg)
+{
+    (void)arg;
+    ESP_LOGW(TAG, "setup mode timed out after %d min, restarting", AP_MODE_TIMEOUT_S / 60);
+    esp_restart();
 }
 
 void web_config_enter_ap_mode(void)
@@ -352,5 +369,18 @@ void web_config_enter_ap_mode(void)
     radio_stop();
     s_ap_mode = true;
     s_ap_deadline_us = esp_timer_get_time() + (int64_t)AP_MODE_TIMEOUT_S * 1000000;
+
+    if (s_ap_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = ap_timeout_cb,
+            .name = "ap_timeout",
+        };
+        if (esp_timer_create(&args, &s_ap_timer) != ESP_OK) {
+            s_ap_timer = NULL;
+        }
+    }
+    if (s_ap_timer != NULL) {
+        esp_timer_start_once(s_ap_timer, (uint64_t)AP_MODE_TIMEOUT_S * 1000000);
+    }
     wifi_app_ap_start();
 }
